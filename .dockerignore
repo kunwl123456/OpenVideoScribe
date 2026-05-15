@@ -1,0 +1,8 @@
+bin/
+node_modules/
+web/node_modules/
+.scribe-test-data/
+.git/
+.idea/
+.vscode/
+*.log

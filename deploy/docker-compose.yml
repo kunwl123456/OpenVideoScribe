@@ -1,0 +1,20 @@
+services:
+  scribe-web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: scribe-web:local
+    container_name: scribe-web
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      SCRIBE_ADDR: ":8787"
+      SCRIBE_DATA_DIR: /data
+      # 国内网络可换镜像：
+      # WHISPER_MODEL_BASE_URL: https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main
+    volumes:
+      - scribe-data:/data
+
+volumes:
+  scribe-data:

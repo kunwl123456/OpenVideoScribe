@@ -1,0 +1,11 @@
+bin/
+node_modules/
+cmd/server/web_dist/*
+!cmd/server/web_dist/.gitkeep
+.DS_Store
+*.log
+
+# OS / build artifacts
+.toolcache/
+.scribe-test-data/
+*.exe
