@@ -4,6 +4,8 @@
 
 Go HTTP 服务 + 嵌入式 React 前端，单二进制部署，目标 Linux 服务器。前身是桌面项目 [scribe-studio](../scribe-studio)，本项目去掉 Wails / 桌面 / 微信注入等本地能力，专注服务端转写。原代号 `scribe-web`，仓库地址、Go module 名、Docker 镜像名仍沿用旧名（迁移成本大，等下个 major 版本一起改）。
 
+![首页：粘贴 B 站 / YouTube 链接，一键转成可搜索的文字稿](docs/screenshot-home.png)
+
 ## 功能
 
 - 粘贴 URL 自动下载、抽音、Whisper 转写（默认输出简体中文）
