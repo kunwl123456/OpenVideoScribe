@@ -62,7 +62,7 @@ scribe-web/
 **一键 Docker（推荐）**：
 
 ```bash
-git clone https://github.com/kunwl123456/scribe-web.git && cd scribe-web
+git clone https://github.com/kunwl123456/OpenVideoScribe.git && cd OpenVideoScribe
 cp scribe-llm.example.json scribe-llm.json   # 想用 AI 摘要就填 api_key + model；不填也能跑转写
 docker compose -f deploy/docker-compose.yml up -d --build
 # 打开 http://<host>:8787
