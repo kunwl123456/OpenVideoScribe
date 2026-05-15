@@ -210,7 +210,22 @@ export default function Home() {
           <div className="empty-hint">提交后所有任务都会保存在这里，下次打开还能看到</div>
         </div>
       ) : (
-        jobs.map((j) => <HistoryCard key={j.id} job={j} onOpen={() => nav(`/jobs/${j.id}`)} />)
+        jobs.map((j) => (
+          <HistoryCard
+            key={j.id}
+            job={j}
+            onOpen={() => nav(`/jobs/${j.id}`)}
+            onDelete={async () => {
+              if (!confirm('确定删除这条转写记录吗？\n视频文件和转写文本都会被删除，无法恢复。')) return
+              try {
+                await api.deleteJob(j.id)
+                setJobs((prev) => prev.filter((x) => x.id !== j.id))
+              } catch (err) {
+                setError(`删除失败：${err}`)
+              }
+            }}
+          />
+        ))
       )}
     </div>
   )
@@ -218,12 +233,34 @@ export default function Home() {
 
 // ---------------- presentation helpers ----------------
 
-function HistoryCard({ job, onOpen }: { job: Job; onOpen: () => void }) {
+function TrashIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
+  )
+}
+
+function HistoryCard({
+  job,
+  onOpen,
+  onDelete,
+}: {
+  job: Job
+  onOpen: () => void
+  onDelete: () => void
+}) {
   const platform = detectPlatform(job.source?.webpage_url || job.url)
   const duration = job.source?.duration ? formatDuration(job.source.duration) : null
   const preview = job.transcript?.full_text
     ? job.transcript.full_text.replace(/\s+/g, ' ').slice(0, 120)
     : null
+  const inProgress = job.phase !== 'done' && job.phase !== 'failed'
   return (
     <div className="history-card" onClick={onOpen}>
       <div className="history-head">
@@ -231,6 +268,19 @@ function HistoryCard({ job, onOpen }: { job: Job; onOpen: () => void }) {
         {duration && <span className="duration-badge">{duration}</span>}
         <div className="history-title">{job.source?.title || job.url}</div>
         <PhaseBadge phase={job.phase} />
+        <button
+          type="button"
+          className="icon-btn danger"
+          title={inProgress ? '任务进行中，无法删除' : '删除该转写记录'}
+          aria-label="删除"
+          disabled={inProgress}
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete()
+          }}
+        >
+          <TrashIcon />
+        </button>
       </div>
       <div className="history-meta">
         {job.source?.uploader && <span>{job.source.uploader}</span>}

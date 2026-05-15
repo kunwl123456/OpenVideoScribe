@@ -17,12 +17,22 @@ import (
 )
 
 // Info is the subset of yt-dlp's --print-json output we care about.
+// Engagement counters (view/like/...) are filled by yt-dlp for both
+// YouTube and bilibili, but each platform omits different fields —
+// expect nil/zero on the ones the source didn't expose. The UI hides
+// any zero-valued counter.
 type Info struct {
-	ID       string  `json:"id"`
-	Title    string  `json:"title"`
-	Uploader string  `json:"uploader"`
-	Duration float64 `json:"duration"`
-	Webpage  string  `json:"webpage_url"`
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	Uploader      string  `json:"uploader"`
+	Duration      float64 `json:"duration"`
+	Webpage       string  `json:"webpage_url"`
+	Thumbnail     string  `json:"thumbnail,omitempty"`
+	ViewCount     int64   `json:"view_count,omitempty"`
+	LikeCount     int64   `json:"like_count,omitempty"`
+	CommentCount  int64   `json:"comment_count,omitempty"`
+	FavoriteCount int64   `json:"favorite_count,omitempty"` // mainly bilibili 收藏
+	RepostCount   int64   `json:"repost_count,omitempty"`   // bilibili 分享
 }
 
 // Result is what Download returns.

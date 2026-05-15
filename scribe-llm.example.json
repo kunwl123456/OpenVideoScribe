@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy this file to scribe-llm.json (project root) or <data_dir>/scribe-llm.json, then fill in api_key and model. Defaults target 火山方舟 (Doubao); change base_url for other OpenAI-compatible providers (DeepSeek, OpenAI, self-hosted vLLM, etc).",
+
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "api_key": "REPLACE_WITH_YOUR_ARK_API_KEY",
+  "model": "REPLACE_WITH_YOUR_ENDPOINT_ID_OR_MODEL_NAME",
+
+  "timeout_seconds": 60,
+  "max_tokens": 4096,
+  "temperature": 0.3,
+
+  "_price_comment": "Optional. Yuan (¥) per 1 million tokens. Used purely for UI cost estimation; leave at 0 to disable. Reference (per 1M tok): doubao-seed-2.0-lite ≈ 输入 0.30 / 输出 0.60; doubao-pro ≈ 输入 0.80 / 输出 2.00; DeepSeek-V3 ≈ 输入 0.50 / 输出 8.00. Always cross-check with the provider's pricing page before relying on the figure.",
+  "price_input_per_mtok": 0.30,
+  "price_output_per_mtok": 0.60
+}

@@ -291,6 +291,75 @@ input, select, textarea {
   transform: none;
 }
 
+.btn.danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid rgba(225, 29, 72, 0.25);
+  box-shadow: none;
+  height: 38px;
+  padding: 0 16px;
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: rgba(225, 29, 72, 0.08);
+  border-color: rgba(225, 29, 72, 0.55);
+  color: var(--danger);
+  transform: none;
+  box-shadow: 0 4px 10px -4px rgba(225, 29, 72, 0.2);
+}
+
+.btn.danger:disabled {
+  color: var(--muted);
+  border-color: var(--border);
+  background: transparent;
+}
+
+/* Small square icon-only button used on history cards.
+ * Sits opacity-faded by default so the row stays calm, comes alive on
+ * card hover (`.history-card:hover` lifts it to opacity:1) or focus. */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  padding: 0;
+}
+
+.history-card:hover .icon-btn,
+.icon-btn:focus-visible {
+  opacity: 1;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(109, 76, 242, 0.25);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background: rgba(225, 29, 72, 0.10);
+  color: var(--danger);
+  border-color: rgba(225, 29, 72, 0.35);
+}
+
+.icon-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.icon-btn svg {
+  display: block;
+}
+
 /* hero options row */
 
 .hero-options {
@@ -571,6 +640,23 @@ input, select, textarea {
   font-weight: 800;
   box-shadow: 0 10px 24px -10px rgba(109, 76, 242, 0.55);
   letter-spacing: -0.02em;
+  overflow: hidden;
+  position: relative;
+}
+
+/* When a real <img> is mounted we drop the giant glyph styling so the
+   thumbnail fills the corner cleanly. The img is sized to the parent
+   and cropped (object-fit: cover) to preserve the rounded corner. */
+.video-card-poster.has-img {
+  background: var(--panel-soft);
+  box-shadow: 0 10px 24px -10px rgba(0, 0, 0, 0.18);
+  padding: 0;
+}
+.video-card-poster.has-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .video-card-main {
@@ -662,6 +748,189 @@ input, select, textarea {
   color: #fff;
   background: var(--accent-grad);
   box-shadow: 0 4px 12px -4px rgba(109, 76, 242, 0.5);
+}
+
+.tab .tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-left: 6px;
+  background: var(--success);
+  vertical-align: middle;
+}
+
+.tab.active .tab-dot {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.tab-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border-strong);
+  margin: 0 4px;
+  align-self: center;
+}
+
+.tabs.scroll-x {
+  max-width: 100%;
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
+}
+.tabs.scroll-x::-webkit-scrollbar { height: 4px; }
+.tabs.scroll-x::-webkit-scrollbar-thumb { background: rgba(109, 76, 242, 0.2); border-radius: 3px; }
+
+/* ------------- summary panel ------------- */
+
+.summary-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 22px 26px;
+  box-shadow: var(--shadow-sm);
+  min-height: 220px;
+}
+
+.summary-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 36px 20px;
+  min-height: 220px;
+}
+
+.summary-empty-title {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.summary-empty-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13.5px;
+  max-width: 480px;
+}
+
+.summary-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.summary-meta-item b {
+  color: var(--text);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.summary-mindmap {
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px 18px;
+  font-family: 'JetBrains Mono', Menlo, Consolas, ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  max-height: 60vh;
+  overflow: auto;
+  color: var(--text);
+}
+
+/* ------------- markdown ------------- */
+
+.markdown {
+  font-size: 15px;
+  line-height: 1.85;
+  color: var(--text);
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 22px 0 10px;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.markdown h1:first-child,
+.markdown h2:first-child,
+.markdown h3:first-child {
+  margin-top: 0;
+}
+
+.markdown h1 { font-size: 22px; }
+.markdown h2 {
+  font-size: 18px;
+  padding-left: 12px;
+  border-left: 4px solid var(--accent);
+  border-radius: 2px;
+}
+.markdown h3 { font-size: 16px; color: var(--text-soft); }
+.markdown h4 { font-size: 14.5px; color: var(--text-soft); font-weight: 600; }
+
+.markdown p {
+  margin: 0 0 14px;
+}
+
+.markdown ul {
+  margin: 6px 0 14px;
+  padding-left: 22px;
+}
+
+.markdown li {
+  margin: 4px 0;
+}
+
+.markdown li::marker {
+  color: var(--accent);
+}
+
+.markdown strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.markdown code {
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', Menlo, Consolas, ui-monospace, monospace;
+  font-size: 0.92em;
+}
+
+/* ------------- spinner ------------- */
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: scribe-spin 0.8s linear infinite;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+
+@keyframes scribe-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* ----------------- content panels ----------------- */
@@ -784,6 +1053,100 @@ input, select, textarea {
   height: 1px;
   background: var(--border);
   margin: 24px 0;
+}
+
+/* ===========================================================
+   Job progress bar (shown while a job is downloading /
+   extracting / transcribing). Reuses the BibiGPT purple
+   gradient. When the backend can't report a fine-grained %,
+   we fall back to a CSS-animated indeterminate stripe.
+   =========================================================== */
+.job-progress {
+  margin-top: 18px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+}
+.job-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.job-progress-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.job-progress-step,
+.job-progress-percent {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.job-progress-percent {
+  font-weight: 600;
+  color: var(--accent);
+}
+.job-progress-bar {
+  position: relative;
+  height: 10px;
+  background: var(--border);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+.job-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent-grad);
+  border-radius: var(--r-pill);
+  transition: width 0.35s ease-out;
+}
+.job-progress-bar.is-indeterminate .job-progress-fill {
+  width: 35%;
+  animation: progress-indet 1.6s ease-in-out infinite;
+}
+@keyframes progress-indet {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(140%); }
+  100% { transform: translateX(-100%); }
+}
+.job-progress-msg {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===========================================================
+   Mindmap (markmap-view) container styling.
+   =========================================================== */
+.mindmap-wrap {
+  position: relative;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: #ffffff;
+  overflow: hidden;
+}
+.mindmap-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.mindmap-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.75);
+  pointer-events: none;
 }
 
 /* legacy card used in a few places (kept for safety) */

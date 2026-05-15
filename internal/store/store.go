@@ -32,22 +32,61 @@ const (
 
 // Job is the canonical record persisted on disk.
 type Job struct {
-	ID            string        `json:"id"`
-	URL           string        `json:"url"`
-	Model         string        `json:"model"`
-	Language      string        `json:"language"`
-	Phase         Phase         `json:"phase"`
-	Message       string        `json:"message,omitempty"`
-	Error         string        `json:"error,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	StartedAt     *time.Time    `json:"started_at,omitempty"`
-	FinishedAt    *time.Time    `json:"finished_at,omitempty"`
-	Source        *ytdlp.Info   `json:"source,omitempty"`
-	Transcript    *asr.Result   `json:"transcript,omitempty"`
-	MediaPath     string        `json:"media_path,omitempty"`
-	Logs          []LogLine     `json:"logs,omitempty"`
-	Progress      map[Phase]int `json:"progress,omitempty"` // 0..100 per phase
-	SimplifiedAt  *time.Time    `json:"simplified_at,omitempty"`
+	ID            string                   `json:"id"`
+	URL           string                   `json:"url"`
+	Model         string                   `json:"model"`
+	Language      string                   `json:"language"`
+	Phase         Phase                    `json:"phase"`
+	Message       string                   `json:"message,omitempty"`
+	Error         string                   `json:"error,omitempty"`
+	CreatedAt     time.Time                `json:"created_at"`
+	StartedAt     *time.Time               `json:"started_at,omitempty"`
+	FinishedAt    *time.Time               `json:"finished_at,omitempty"`
+	Source        *ytdlp.Info              `json:"source,omitempty"`
+	Transcript    *asr.Result              `json:"transcript,omitempty"`
+	MediaPath     string                   `json:"media_path,omitempty"`
+	ThumbnailPath string                   `json:"thumbnail_path,omitempty"`
+	Logs          []LogLine                `json:"logs,omitempty"`
+	Progress      map[Phase]int            `json:"progress,omitempty"` // 0..100 per phase
+	SimplifiedAt  *time.Time               `json:"simplified_at,omitempty"`
+	Summaries     map[string]*SummaryEntry `json:"summaries,omitempty"` // key is summary.Kind string
+}
+
+// SummaryStatus tracks the lifecycle of one summary artefact. Persisted
+// so a page refresh / route change can recover the in-flight UI without
+// having to keep ephemeral React state.
+//
+//	pending — POST /summarize accepted, goroutine running
+//	done    — markdown + token counts populated
+//	failed  — Error explains why; UI shows "重新生成"
+type SummaryStatus string
+
+const (
+	SummaryPending SummaryStatus = "pending"
+	SummaryDone    SummaryStatus = "done"
+	SummaryFailed  SummaryStatus = "failed"
+)
+
+// SummaryEntry is one LLM-generated artefact attached to a job. Lives
+// in the store package (not in summary/) to keep the persistence type
+// dependency-free; the summary package converts to/from this shape.
+//
+// Markdown / TokensUsed / DurationMs etc are only meaningful when
+// Status == SummaryDone. For Pending the only fields filled are Kind,
+// Status, GeneratedAt (= start time). For Failed: Error.
+type SummaryEntry struct {
+	Kind              string        `json:"kind"`
+	Status            SummaryStatus `json:"status"`
+	Markdown          string        `json:"markdown,omitempty"`
+	Model             string        `json:"model,omitempty"`
+	TokensUsed        int           `json:"tokens_used,omitempty"`
+	PromptTokens      int           `json:"prompt_tokens,omitempty"`
+	CompletionTokens  int           `json:"completion_tokens,omitempty"`
+	EstimatedCost     float64       `json:"estimated_cost,omitempty"`
+	EstimatedCostText string        `json:"estimated_cost_text,omitempty"`
+	DurationMs        int64         `json:"duration_ms,omitempty"`
+	Error             string        `json:"error,omitempty"`
+	GeneratedAt       time.Time     `json:"generated_at"`
 }
 
 // LogLine is a timestamped UI log entry. Kept short on purpose; the
@@ -77,6 +116,9 @@ func New(dataDir string) (*Store, error) {
 	}
 	if n := s.migrateSimplifiedLocked(); n > 0 {
 		log.Printf("store: migrated %d transcript(s) to simplified Chinese", n)
+	}
+	if legacy, stale := s.recoverStaleSummariesLocked(); legacy+stale > 0 {
+		log.Printf("store: summary recovery — promoted %d legacy entr(ies) to done, marked %d stale pending as failed", legacy, stale)
 	}
 	return s, nil
 }
@@ -195,6 +237,125 @@ func (s *Store) List() []*Job {
 	}
 	sort.Slice(out, func(i, k int) bool { return out[i].CreatedAt.After(out[k].CreatedAt) })
 	return out
+}
+
+// SetSummary stores (or overwrites) one summary artefact under the
+// job. kind is the summary.Kind string value; the wire format never
+// touches the summary package so this method stays import-loop-free.
+func (s *Store) SetSummary(id, kind string, entry *SummaryEntry) error {
+	_, err := s.Update(id, func(j *Job) {
+		if j.Summaries == nil {
+			j.Summaries = map[string]*SummaryEntry{}
+		}
+		j.Summaries[kind] = entry
+	})
+	return err
+}
+
+// SummaryStatusOf returns the persisted status for one kind without
+// loading the full job. Returns ("", false) when no entry exists yet.
+// Used by the HTTP layer for the in-flight concurrency check.
+func (s *Store) SummaryStatusOf(id, kind string) (SummaryStatus, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok || j.Summaries == nil {
+		return "", false
+	}
+	entry, ok := j.Summaries[kind]
+	if !ok || entry == nil {
+		return "", false
+	}
+	return entry.Status, true
+}
+
+// SetSummaryStatus mutates only the status (+ error message on
+// failure) of an existing entry. Use when the entry already exists
+// (e.g. pending → failed transition); for the pending → done case
+// callers pass the full new entry via SetSummary so all the result
+// fields land atomically.
+func (s *Store) SetSummaryStatus(id, kind string, status SummaryStatus, errMsg string) error {
+	_, err := s.Update(id, func(j *Job) {
+		if j.Summaries == nil {
+			j.Summaries = map[string]*SummaryEntry{}
+		}
+		entry := j.Summaries[kind]
+		if entry == nil {
+			entry = &SummaryEntry{Kind: kind, GeneratedAt: time.Now().UTC()}
+			j.Summaries[kind] = entry
+		}
+		entry.Status = status
+		entry.Error = errMsg
+	})
+	return err
+}
+
+// recoverStaleSummariesLocked normalises summary entries at boot.
+// Returns the counts of each transition for the caller to log.
+//
+//	pre-status records (Markdown filled but Status empty) → done
+//	pending records left over from a crashed/restarted process → failed
+//
+// Without this a server restart in the middle of a generate would
+// leave the UI spinning forever, and entries written before the
+// Status field existed would render as "still generating".
+func (s *Store) recoverStaleSummariesLocked() (legacy, stale int) {
+	for _, j := range s.jobs {
+		if j.Summaries == nil {
+			continue
+		}
+		dirty := false
+		for k, e := range j.Summaries {
+			if e == nil {
+				continue
+			}
+			switch {
+			case e.Status == "":
+				// Legacy entry written before Status existed —
+				// any record on disk implies completion.
+				e.Status = SummaryDone
+				dirty = true
+				legacy++
+			case e.Status == SummaryPending:
+				e.Status = SummaryFailed
+				if e.Error == "" {
+					e.Error = "server restarted while generating"
+				}
+				dirty = true
+				stale++
+			}
+			j.Summaries[k] = e
+		}
+		if dirty {
+			if err := s.persistLocked(j); err != nil {
+				log.Printf("store: persist stale summary recovery for %s: %v", j.ID, err)
+			}
+		}
+	}
+	return legacy, stale
+}
+
+// Delete removes the job from memory and unlinks its on-disk JSON file.
+// It returns a copy of the deleted job so callers (jobs.Manager) can
+// reach Source.ID / MediaPath to clean up media files outside the lock.
+//
+// We intentionally do NOT touch downloads / models / work here; the
+// store only owns <dir>/<id>.json. Media cleanup is the jobs layer's
+// job, so it can apply its own safety policy.
+func (s *Store) Delete(id string) (*Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return nil, fmt.Errorf("job %s not found", id)
+	}
+	clone := *j
+	path := filepath.Join(s.dir, id+".json")
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove %s: %w", path, err)
+	}
+	delete(s.jobs, id)
+	return &clone, nil
 }
 
 func (s *Store) persistLocked(j *Job) error {

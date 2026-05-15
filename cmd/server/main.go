@@ -16,8 +16,10 @@ import (
 	"scribe-web/internal/config"
 	"scribe-web/internal/httpapi"
 	"scribe-web/internal/jobs"
+	"scribe-web/internal/llm"
 	"scribe-web/internal/models"
 	"scribe-web/internal/store"
+	"scribe-web/internal/summary"
 )
 
 // staticFS is the React build output. The web/ frontend writes into
@@ -46,6 +48,13 @@ func main() {
 
 	mm := models.NewManager(cfg)
 	jm := jobs.NewManager(cfg, st)
+	sm := summary.New(llm.New(cfg.LLM), cfg.LLM)
+	if cfg.LLM != nil && cfg.LLM.Enabled() {
+		red := cfg.LLM.Redacted()
+		log.Printf("scribe-web: llm enabled (base_url=%s model=%s key=%s)", red.BaseURL, red.Model, red.APIKey)
+	} else {
+		log.Printf("scribe-web: llm disabled (no api_key/model configured) — summary endpoints will return 503")
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -57,7 +66,7 @@ func main() {
 		log.Printf("scribe-web: no embedded UI found (web_dist/index.html missing); running API-only")
 	}
 
-	handler := httpapi.New(cfg, st, jm, mm, uiFS)
+	handler := httpapi.New(cfg, st, jm, mm, sm, uiFS)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

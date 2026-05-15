@@ -5,8 +5,11 @@ package models
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -14,6 +17,22 @@ import (
 
 	"scribe-web/internal/config"
 )
+
+// httpClient is shared across downloads. We deliberately set a generous
+// per-request body timeout (large models stream for minutes) but cap
+// connect/TLS handshake so a dead mirror falls through to the next one
+// in seconds rather than minutes.
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
+	},
+}
 
 // Spec describes one downloadable model.
 type Spec struct {
@@ -148,12 +167,42 @@ func (m *Manager) download(ctx context.Context, spec Spec, cb func(Progress)) er
 		return nil
 	}
 
-	url := fmt.Sprintf("%s/%s", m.cfg.ModelBaseURL, spec.Filename)
+	bases := m.cfg.ModelBaseURLs
+	if len(bases) == 0 {
+		return errors.New("no model base URL configured")
+	}
+
+	var lastErr error
+	for i, base := range bases {
+		url := fmt.Sprintf("%s/%s", base, spec.Filename)
+		mirrorTag := ""
+		if len(bases) > 1 {
+			mirrorTag = fmt.Sprintf("镜像 %d/%d · ", i+1, len(bases))
+		}
+		cb(Progress{Key: spec.Key, Message: mirrorTag + "连接中…"})
+
+		err := fetchToFile(ctx, url, finalPath, spec, mirrorTag, cb)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil { // user cancelled — don't fall through
+			return err
+		}
+		log.Printf("models: download %s from %s failed: %v", spec.Key, base, err)
+		lastErr = err
+	}
+	return fmt.Errorf("all mirrors failed: %w", lastErr)
+}
+
+// fetchToFile streams one URL into <finalPath>.part and renames it on
+// success. It is the only place that touches the network for a given
+// mirror attempt; callers loop over mirrors.
+func fetchToFile(ctx context.Context, url, finalPath string, spec Spec, mirrorTag string, cb func(Progress)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetch model: %w", err)
 	}
@@ -167,6 +216,12 @@ func (m *Manager) download(ctx context.Context, spec Spec, cb func(Progress)) er
 	if err != nil {
 		return err
 	}
+	// Make sure we never leak a half-written file across mirror retries.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(partPath)
+		}
+	}()
 
 	total := spec.Bytes
 	if resp.ContentLength > 0 {
@@ -181,7 +236,8 @@ func (m *Manager) download(ctx context.Context, spec Spec, cb func(Progress)) er
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				f.Close()
-				return werr
+				err = werr
+				return err
 			}
 			written += int64(n)
 			if time.Since(last) > 200*time.Millisecond || rerr != nil {
@@ -192,7 +248,7 @@ func (m *Manager) download(ctx context.Context, spec Spec, cb func(Progress)) er
 				cb(Progress{
 					Key:      spec.Key,
 					Fraction: frac,
-					Message:  fmt.Sprintf("%s / %s", humanBytes(written), humanBytes(total)),
+					Message:  fmt.Sprintf("%s%s / %s", mirrorTag, humanBytes(written), humanBytes(total)),
 				})
 				last = time.Now()
 			}
@@ -202,13 +258,19 @@ func (m *Manager) download(ctx context.Context, spec Spec, cb func(Progress)) er
 		}
 		if rerr != nil {
 			f.Close()
-			return rerr
+			err = rerr
+			return err
 		}
 	}
-	if err := f.Close(); err != nil {
+	if cerr := f.Close(); cerr != nil {
+		err = cerr
 		return err
 	}
-	return os.Rename(partPath, finalPath)
+	if rerr := os.Rename(partPath, finalPath); rerr != nil {
+		err = rerr
+		return err
+	}
+	return nil
 }
 
 func humanBytes(n int64) string {

@@ -10,19 +10,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // Config is a flat snapshot taken from env vars at boot.
 type Config struct {
-	Addr         string
-	DataDir      string
-	ModelsDir    string
-	DownloadsDir string
-	WorkDir      string
-	WhisperBin   string
-	FFmpegBin    string
-	YtDlpBin     string
-	ModelBaseURL string
+	Addr          string
+	DataDir       string
+	ModelsDir     string
+	DownloadsDir  string
+	ThumbnailsDir string
+	WorkDir       string
+	WhisperBin    string
+	FFmpegBin     string
+	YtDlpBin      string
+	ModelBaseURLs []string   // tried in order; first that succeeds wins
+	LLM           *LLMConfig // OpenAI-compatible LLM provider, may be unconfigured
 }
 
 // Load builds a Config from env vars, creating the data directories on
@@ -37,18 +40,19 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		Addr:         addr,
-		DataDir:      dataDir,
-		ModelsDir:    filepath.Join(dataDir, "models"),
-		DownloadsDir: filepath.Join(dataDir, "downloads"),
-		WorkDir:      filepath.Join(dataDir, "work"),
-		WhisperBin:   envOr("SCRIBE_WHISPER_BIN", ""),
-		FFmpegBin:    envOr("SCRIBE_FFMPEG_BIN", ""),
-		YtDlpBin:     envOr("SCRIBE_YTDLP_BIN", ""),
-		ModelBaseURL: envOr("WHISPER_MODEL_BASE_URL", "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"),
+		Addr:          addr,
+		DataDir:       dataDir,
+		ModelsDir:     filepath.Join(dataDir, "models"),
+		DownloadsDir:  filepath.Join(dataDir, "downloads"),
+		ThumbnailsDir: filepath.Join(dataDir, "thumbnails"),
+		WorkDir:       filepath.Join(dataDir, "work"),
+		WhisperBin:    envOr("SCRIBE_WHISPER_BIN", ""),
+		FFmpegBin:     envOr("SCRIBE_FFMPEG_BIN", ""),
+		YtDlpBin:      envOr("SCRIBE_YTDLP_BIN", ""),
+		ModelBaseURLs: parseModelBaseURLs(os.Getenv("WHISPER_MODEL_BASE_URL")),
 	}
 
-	for _, dir := range []string{c.ModelsDir, c.DownloadsDir, c.WorkDir} {
+	for _, dir := range []string{c.ModelsDir, c.DownloadsDir, c.ThumbnailsDir, c.WorkDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -57,6 +61,12 @@ func Load() (*Config, error) {
 	c.WhisperBin = resolveBinary(c.WhisperBin, "whisper-cli")
 	c.FFmpegBin = resolveBinary(c.FFmpegBin, "ffmpeg")
 	c.YtDlpBin = resolveBinary(c.YtDlpBin, "yt-dlp")
+
+	llm, err := loadLLMConfig(c.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	c.LLM = llm
 
 	return c, nil
 }
@@ -84,6 +94,33 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// defaultModelBaseURLs is the fallback list when WHISPER_MODEL_BASE_URL
+// is unset. Order matters: official first, then a known China-friendly
+// mirror so users behind the GFW still succeed without configuration.
+var defaultModelBaseURLs = []string{
+	"https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+	"https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main",
+}
+
+// parseModelBaseURLs accepts a comma-separated env value and returns
+// the list to try in order. Empty input yields the built-in default.
+func parseModelBaseURLs(raw string) []string {
+	if raw == "" {
+		return append([]string(nil), defaultModelBaseURLs...)
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(strings.TrimRight(p, "/")); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), defaultModelBaseURLs...)
+	}
+	return out
 }
 
 func envSuffix(name string) string {

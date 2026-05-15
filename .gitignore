@@ -9,3 +9,6 @@ cmd/server/web_dist/*
 .toolcache/
 .scribe-test-data/
 *.exe
+
+# Local LLM provider config (contains API keys; example file ships in repo)
+scribe-llm.json

@@ -45,12 +45,43 @@ export type SourceInfo = {
   uploader: string
   duration: number
   webpage_url: string
+  thumbnail?: string
+  view_count?: number
+  like_count?: number
+  comment_count?: number
+  favorite_count?: number
+  repost_count?: number
 }
 
 export type LogLine = {
   at: string
   phase: Phase
   message: string
+}
+
+export type SummaryKind = 'brief' | 'detailed' | 'outline' | 'mindmap'
+
+export type SummaryStatus = 'pending' | 'done' | 'failed'
+
+export type Summary = {
+  kind: SummaryKind
+  status: SummaryStatus
+  markdown?: string
+  model?: string
+  tokens_used?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  estimated_cost?: number
+  estimated_cost_text?: string
+  duration_ms?: number
+  error?: string
+  generated_at: string
+}
+
+export type SummaryError = {
+  error: string
+  hint?: string
+  detail?: string
 }
 
 export type Job = {
@@ -68,6 +99,8 @@ export type Job = {
   transcript?: TranscriptResult
   media_path?: string
   logs?: LogLine[]
+  progress?: Partial<Record<Phase, number>>
+  summaries?: Partial<Record<SummaryKind, Summary>>
 }
 
 export type JobEvent = {
@@ -78,6 +111,21 @@ export type JobEvent = {
   error?: string
 }
 
+// ApiError carries the HTTP status + any structured JSON body the
+// server attached (e.g. {error, hint, detail} from /summarize on 503).
+// UI code that wants to display friendly hints can do
+// `if (err instanceof ApiError && err.status === 503) ...`.
+export class ApiError extends Error {
+  status: number
+  body: unknown
+  constructor(status: number, message: string, body: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.body = body
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -85,7 +133,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(text || `HTTP ${res.status}`)
+    let body: unknown = text
+    let message = text
+    try {
+      body = JSON.parse(text)
+      if (body && typeof body === 'object' && 'error' in (body as any)) {
+        message = String((body as any).error)
+      }
+    } catch {
+      // not JSON — keep the plain text
+    }
+    throw new ApiError(res.status, message || `HTTP ${res.status}`, body)
   }
   if (res.status === 204) return undefined as unknown as T
   return res.json() as Promise<T>
@@ -102,8 +160,42 @@ export const api = {
   createJob: (payload: { url: string; model: string; language?: string }) =>
     request<Job>('/api/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   getJob: (id: string) => request<Job>(`/api/jobs/${encodeURIComponent(id)}`),
+  deleteJob: (id: string) =>
+    request<void>(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // summarize triggers an async generation on the server. Returns
+  // resolved with:
+  //   - 200 + done body (legacy / unused now but tolerated)
+  //   - 202 + pending body (new normal path)
+  //   - 409 + pending body when another request is already in-flight
+  //     for the same (job, kind). The frontend treats 409 the same as
+  //     202: "someone else started it; keep polling".
+  // Real failures (401/429/500/503/...) still throw ApiError so the
+  // UI can map them to friendly hints.
+  summarize: async (id: string, kind: SummaryKind): Promise<Summary> => {
+    const path = `/api/jobs/${encodeURIComponent(id)}/summarize?kind=${encodeURIComponent(kind)}`
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const text = await res.text().catch(() => '')
+    let body: unknown = text
+    try { body = JSON.parse(text) } catch { /* keep text */ }
+    if (res.status === 200 || res.status === 202) {
+      return body as Summary
+    }
+    // 409 only counts as pending when the body says so; some other
+    // 409 (e.g. "transcript not ready") is a real error.
+    if (res.status === 409 && body && typeof body === 'object' && (body as { status?: string }).status === 'pending') {
+      return body as Summary
+    }
+    const message = (body && typeof body === 'object' && 'error' in (body as Record<string, unknown>))
+      ? String((body as { error: unknown }).error)
+      : (text || `HTTP ${res.status}`)
+    throw new ApiError(res.status, message, body)
+  },
   exportURL: (id: string, format: 'srt' | 'md' | 'txt') =>
     `/api/jobs/${encodeURIComponent(id)}/export?format=${format}`,
+  thumbnailURL: (id: string) => `/api/jobs/${encodeURIComponent(id)}/thumbnail`,
 }
 
 // streamJob opens an SSE connection. Returns a closer.
