@@ -1,8 +1,8 @@
-# Scribe Web
+# OpenVideoScribe
 
-> 把视频链接（YouTube / B 站 等）粘贴进网页，服务端用 yt-dlp + ffmpeg + whisper.cpp 转成文字稿。
+> 把视频链接（YouTube / B 站 等）粘贴进网页，服务端用 yt-dlp + ffmpeg + whisper.cpp 转成文字稿，再调 LLM 出摘要 / 大纲 / 思维导图。
 
-Go HTTP 服务 + 嵌入式 React 前端，单二进制部署，目标 Linux 服务器。前身是桌面项目 [scribe-studio](../scribe-studio)，本项目去掉 Wails / 桌面 / 微信注入等本地能力，专注服务端转写。
+Go HTTP 服务 + 嵌入式 React 前端，单二进制部署，目标 Linux 服务器。前身是桌面项目 [scribe-studio](../scribe-studio)，本项目去掉 Wails / 桌面 / 微信注入等本地能力，专注服务端转写。原代号 `scribe-web`，仓库地址、Go module 名、Docker 镜像名仍沿用旧名（迁移成本大，等下个 major 版本一起改）。
 
 ## 功能
 
