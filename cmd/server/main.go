@@ -20,6 +20,8 @@ import (
 	"scribe-web/internal/models"
 	"scribe-web/internal/store"
 	"scribe-web/internal/summary"
+	"scribe-web/internal/vision"
+	"scribe-web/internal/vlm"
 )
 
 // staticFS is the React build output. The web/ frontend writes into
@@ -47,13 +49,21 @@ func main() {
 	}
 
 	mm := models.NewManager(cfg)
-	jm := jobs.NewManager(cfg, st)
+	vs := vision.New(vlm.New(cfg.VLM), cfg.VLM)
+	jm := jobs.NewManager(cfg, st, vs)
 	sm := summary.New(llm.New(cfg.LLM), cfg.LLM)
 	if cfg.LLM != nil && cfg.LLM.Enabled() {
 		red := cfg.LLM.Redacted()
 		log.Printf("scribe-web: llm enabled (base_url=%s model=%s key=%s)", red.BaseURL, red.Model, red.APIKey)
 	} else {
 		log.Printf("scribe-web: llm disabled (no api_key/model configured) — summary endpoints will return 503")
+	}
+	if cfg.VLM != nil && cfg.VLM.Enabled() {
+		red := cfg.VLM.Redacted()
+		log.Printf("scribe-web: vlm enabled (base_url=%s model=%s key=%s frames<=%d concurrency=%d)",
+			red.BaseURL, red.Model, red.APIKey, red.MaxFrames, red.Concurrency)
+	} else {
+		log.Printf("scribe-web: vlm disabled (no api_key/model configured) — visual analysis stage will be skipped")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

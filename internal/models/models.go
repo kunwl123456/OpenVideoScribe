@@ -18,19 +18,20 @@ import (
 	"scribe-web/internal/config"
 )
 
-// httpClient is shared across downloads. We deliberately set a generous
-// per-request body timeout (large models stream for minutes) but cap
-// connect/TLS handshake so a dead mirror falls through to the next one
-// in seconds rather than minutes.
+// httpClient is shared across downloads. Timeouts are intentionally
+// generous because the Hugging Face mirrors (hf-mirror.com) actually
+// 308/302 redirect to cas-bridge.xethub.hf.co (AWS S3 us-east), and
+// each TLS handshake from China can take 10–20s. We still cap each
+// phase so a truly dead mirror falls through to the next.
 var httpClient = &http.Client{
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   8 * time.Second,
+			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSHandshakeTimeout:   8 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       60 * time.Second,
 	},
 }
 

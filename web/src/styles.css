@@ -482,6 +482,52 @@ input, select, textarea {
   margin-top: 6px;
 }
 
+/* Inline model-download status shown in the hero when the user picks
+   a model that hasn't been downloaded yet. Visually mirrors
+   .job-progress so the form keeps a single progress-bar language. */
+.model-inline {
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+}
+.model-inline-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.model-inline-label {
+  flex: 1;
+  color: var(--text);
+}
+.model-inline-label strong {
+  font-weight: 700;
+  margin: 0 2px;
+}
+.model-inline-percent {
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.model-inline-percent.error {
+  color: var(--danger);
+}
+.model-inline-hint {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.model-inline-error {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--danger);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
 /* ----------------- history cards ----------------- */
 
 .history-card {
@@ -565,6 +611,7 @@ input, select, textarea {
 .badge.downloading{ background: #ecfdf5; color: #047857; border-color: #d1fae5; }
 .badge.extracting { background: #eff6ff; color: #1d4ed8; border-color: #dbeafe; }
 .badge.transcribing { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+.badge.analyzing  { background: #f5f3ff; color: #6d28d9; border-color: #ede9fe; }
 .badge.done       { background: #ecfccb; color: #3f6212; border-color: #d9f99d; }
 .badge.failed     { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
 

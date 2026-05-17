@@ -16,6 +16,20 @@ import (
 	"scribe-web/internal/config"
 )
 
+// FormatAudioOnly is yt-dlp's format selector for "best audio stream
+// only" — the historical default when this server only did ASR. It
+// keeps downloads small (a few MB for a 15-minute talk) at the cost of
+// no video track, which is fine when the visual stage is disabled.
+const FormatAudioOnly = "bestaudio/best"
+
+// FormatVideoPlusAudio asks yt-dlp to mux the best video and best
+// audio streams into one container (typically .mp4). Required when
+// the visual stage is enabled, because ffmpeg keyframe extraction
+// needs an actual video stream — a pure m4a triggers
+// "Output file #0 does not contain any stream" and the analyzer
+// returns zero frames.
+const FormatVideoPlusAudio = "bestvideo*+bestaudio/best"
+
 // Info is the subset of yt-dlp's --print-json output we care about.
 // Engagement counters (view/like/...) are filled by yt-dlp for both
 // YouTube and bilibili, but each platform omits different fields —
@@ -44,9 +58,16 @@ type Result struct {
 // Download fetches the bestaudio variant of `url` into outDir and
 // returns the resulting file path + metadata. We use --no-playlist so
 // pasting a playlist URL doesn't quietly explode into N downloads.
-func Download(ctx context.Context, cfg *config.Config, url, outDir string, onProgress func(string)) (*Result, error) {
+// Download runs yt-dlp against url and writes a single media file
+// into outDir. The format parameter is forwarded verbatim to yt-dlp's
+// "-f" flag; pass "" to fall back to FormatAudioOnly so the
+// pre-visual-stage call sites keep working unchanged.
+func Download(ctx context.Context, cfg *config.Config, url, outDir, format string, onProgress func(string)) (*Result, error) {
 	if err := config.RequireBin(cfg.YtDlpBin, "yt-dlp"); err != nil {
 		return nil, err
+	}
+	if format == "" {
+		format = FormatAudioOnly
 	}
 
 	tmpl := filepath.Join(outDir, "%(id)s.%(ext)s")
@@ -55,7 +76,7 @@ func Download(ctx context.Context, cfg *config.Config, url, outDir string, onPro
 		"--no-warnings",
 		"--newline",
 		"--print-json",
-		"-f", "bestaudio/best",
+		"-f", format,
 		"-o", tmpl,
 		url,
 	}

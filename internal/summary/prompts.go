@@ -20,6 +20,11 @@ type PromptVars struct {
 	Uploader        string
 	DurationSeconds int
 	FullText        string // already truncated by Service.prepareText
+	// VisualInsights is a pre-rendered block of per-timestamp visual
+	// descriptions (caption + OCR text) produced by the VLM stage.
+	// Empty when the visual stage didn't run; templates conditionally
+	// include the block via `{{- if .VisualInsights}}`.
+	VisualInsights string
 }
 
 // systemPrompt frames the assistant's role for every Kind. We bake the
@@ -46,6 +51,11 @@ const briefPrompt = `请用一句话（控制在 50 个汉字以内）总结下�
 """
 {{.FullText}}
 """
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
 
 只返回那一句总结，不要任何前缀。`
 
@@ -66,6 +76,11 @@ const detailedPrompt = `请基于下面这段视频转写，写一段约 300 字
 """
 {{.FullText}}
 """
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
 
 只返回那段摘要，不要 Markdown 标题，也不要"以下是"等开场白。`
 
@@ -87,6 +102,11 @@ const outlinePrompt = `请把下面这段视频转写整理成一份层级清晰
 """
 {{.FullText}}
 """
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
 
 直接输出 Markdown，不要再额外解释。`
 
@@ -110,6 +130,11 @@ const mindmapPrompt = `请基于下面这段视频转写生成一份思维导图
 """
 {{.FullText}}
 """
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
 
 直接输出 Markdown，不要 ` + "```" + ` 代码围栏，也不要额外解释。`
 

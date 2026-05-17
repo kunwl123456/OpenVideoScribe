@@ -1,0 +1,21 @@
+{
+  "_comment": "OPTIONAL. Copy this file to scribe-vlm.json (project root or <data_dir>), then fill in api_key and model. When the file is absent or api_key/model are empty, the visual-analysis stage is silently skipped and the pipeline behaves identically to the pre-VLM build (transcript + LLM summary only). Defaults target 火山方舟 Doubao Vision; any OpenAI-vision-compatible provider works — point base_url at it.",
+
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "api_key": "REPLACE_WITH_YOUR_ARK_API_KEY",
+  "model": "doubao-seed-1-6-vision-250815",
+
+  "timeout_seconds": 90,
+  "max_tokens": 600,
+  "temperature": 0.2,
+
+  "_price_comment": "Optional. Yuan (¥) per 1 million tokens. Reference: doubao-seed-1.6-vision ≈ 输入 0.80 / 输出 8.00.",
+  "price_input_per_mtok": 0.80,
+  "price_output_per_mtok": 8.00,
+
+  "_keyframe_comment": "Hybrid keyframe selection knobs. scene_threshold uses ffmpeg's select=gt(scene,X) detector (0.3–0.5 typical; 0 disables scene-based selection). frame_interval_seconds is the minimum gap between two sampled frames, ensuring lectures / talking-head videos still get periodic coverage. max_frames is the hard ceiling per job (cost firewall) — when the extractor yields more we down-sample evenly. concurrency controls how many VLM calls run in parallel per job.",
+  "frame_interval_seconds": 15,
+  "scene_threshold": 0.4,
+  "max_frames": 60,
+  "concurrency": 4
+}

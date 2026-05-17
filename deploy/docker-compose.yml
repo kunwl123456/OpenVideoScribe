@@ -11,10 +11,11 @@ services:
     environment:
       SCRIBE_ADDR: ":8787"
       SCRIBE_DATA_DIR: /data
-      # 国内网络可换镜像：
-      # WHISPER_MODEL_BASE_URL: https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main
+      WHISPER_MODEL_BASE_URL: "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main,https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
     volumes:
       - scribe-data:/data
+      - ../scribe-llm.json:/data/scribe-llm.json:ro
+      - ../scribe-vlm.json:/data/scribe-vlm.json:ro
 
 volumes:
   scribe-data:

@@ -15,6 +15,10 @@ export default function Home() {
   const [progress, setProgress] = useState<Record<string, ModelProgress>>({})
   const [jobs, setJobs] = useState<Job[]>([])
   const [modelsCollapsed, setModelsCollapsed] = useState(true)
+  // Only auto-snap to the first installed model once, on initial load.
+  // Otherwise the 3s poller would keep yanking the user out of a model
+  // they deliberately picked to download.
+  const [modelPicked, setModelPicked] = useState(false)
 
   async function refreshModels() {
     try {
@@ -23,10 +27,13 @@ export default function Home() {
       const pmap: Record<string, ModelProgress> = {}
       for (const p of res.progress ?? []) pmap[p.key] = p
       setProgress(pmap)
-      // Default to the first installed model when possible.
-      const firstInstalled = res.models?.find((m) => m.installed)
-      if (firstInstalled && !res.models?.find((m) => m.key === model)?.installed) {
-        setModel(firstInstalled.key)
+      if (!modelPicked) {
+        const firstInstalled = res.models?.find((m) => m.installed)
+        const currentInstalled = res.models?.find((m) => m.key === model)?.installed
+        if (firstInstalled && !currentInstalled) {
+          setModel(firstInstalled.key)
+        }
+        setModelPicked(true)
       }
     } catch (e) {
       console.warn('listModels failed', e)
@@ -89,7 +96,41 @@ export default function Home() {
     }
   }
 
+  // Picking a not-yet-installed model from the <select> should auto-kick
+  // the download — the back-end Start() is idempotent, so re-issuing
+  // while a download is already running is a safe no-op.
+  function handleModelChange(key: string) {
+    setModel(key)
+    setModelPicked(true)
+    const m = models.find((x) => x.key === key)
+    if (m && !m.installed) {
+      const p = progress[key]
+      const downloading = p && !p.done && !p.error
+      if (!downloading) downloadModel(key)
+    }
+  }
+
   const installedCount = models.filter((m) => m.installed).length
+  const selectedModel = models.find((m) => m.key === model)
+  const selectedProgress = progress[model]
+  // Treat "models not yet loaded" as ready so the form is not stuck
+  // disabled on first paint before /api/models comes back.
+  const selectedReady = !selectedModel || selectedModel.installed
+  const selectedDownloading =
+    !selectedReady && !!selectedProgress && !selectedProgress.done && !selectedProgress.error
+  const selectedFailed = !selectedReady && !!selectedProgress?.error
+  const selectedPercent = selectedProgress?.fraction
+    ? Math.round(selectedProgress.fraction * 100)
+    : 0
+  const submitLabel = submitting
+    ? '提交中…'
+    : selectedDownloading
+    ? selectedPercent > 0
+      ? `模型下载中（${selectedPercent}%）`
+      : '模型下载中…'
+    : !selectedReady
+    ? '请先下载模型'
+    : '开始转写 →'
 
   return (
     <div className="shell">
@@ -114,16 +155,24 @@ export default function Home() {
             value={url}
             onChange={(e) => setUrl(e.target.value)}
           />
-          <button className="btn" type="submit" disabled={submitting}>
-            {submitting ? '提交中…' : '开始转写 →'}
+          <button
+            className="btn"
+            type="submit"
+            disabled={submitting || !selectedReady}
+          >
+            {submitLabel}
           </button>
         </form>
         <div className="hero-options">
           <div className="hero-option">
             <span className="label">模型</span>
-            <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
+            <select
+              className="select"
+              value={model}
+              onChange={(e) => handleModelChange(e.target.value)}
+            >
               {models.map((m) => (
-                <option key={m.key} value={m.key} disabled={!m.installed}>
+                <option key={m.key} value={m.key}>
                   {m.label} {m.installed ? '' : '（未下载）'}
                 </option>
               ))}
@@ -139,6 +188,65 @@ export default function Home() {
             </select>
           </div>
         </div>
+        {!selectedReady && selectedModel && (
+          <div className="model-inline" style={{ marginTop: 16 }}>
+            <div className="model-inline-head">
+              <span className="model-inline-label">
+                模型 <strong>{selectedModel.label}</strong> 未下载
+              </span>
+              {selectedDownloading && (
+                <span className="model-inline-percent">
+                  {selectedPercent > 0 ? `${selectedPercent}%` : '准备中…'}
+                </span>
+              )}
+              {selectedFailed && <span className="model-inline-percent error">下载失败</span>}
+              {!selectedDownloading && !selectedFailed && (
+                <button
+                  type="button"
+                  className="btn secondary"
+                  style={{ height: 30, padding: '0 12px', fontSize: 12.5 }}
+                  onClick={() => downloadModel(selectedModel.key)}
+                >
+                  立即下载
+                </button>
+              )}
+            </div>
+            {selectedDownloading && (
+              <>
+                <div
+                  className={`job-progress-bar${selectedPercent > 0 ? '' : ' is-indeterminate'}`}
+                  style={{ marginTop: 10 }}
+                >
+                  <div
+                    className="job-progress-fill"
+                    style={selectedPercent > 0 ? { width: `${selectedPercent}%` } : undefined}
+                  />
+                </div>
+                {selectedProgress?.message && (
+                  <div className="job-progress-msg">{selectedProgress.message}</div>
+                )}
+              </>
+            )}
+            {selectedFailed && (
+              <div className="model-inline-error">
+                {selectedProgress?.error}
+                <button
+                  type="button"
+                  className="btn ghost"
+                  style={{ height: 28, padding: '0 10px', fontSize: 12, marginLeft: 8 }}
+                  onClick={() => downloadModel(selectedModel.key)}
+                >
+                  重试
+                </button>
+              </div>
+            )}
+            {!selectedDownloading && !selectedFailed && (
+              <div className="model-inline-hint">
+                选择该模型后已自动开始下载，完成前无法提交转写
+              </div>
+            )}
+          </div>
+        )}
         {error && <div className="error" style={{ marginTop: 16 }}>{error}</div>}
       </section>
 

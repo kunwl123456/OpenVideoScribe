@@ -21,6 +21,7 @@ import (
 	"scribe-web/internal/config"
 	"scribe-web/internal/media"
 	"scribe-web/internal/store"
+	"scribe-web/internal/vision"
 	"scribe-web/internal/ytdlp"
 )
 
@@ -36,15 +37,16 @@ var ErrJobInProgress = errors.New("job is still in progress")
 
 // Manager owns the queue, worker, and event fan-out.
 type Manager struct {
-	cfg   *config.Config
-	store *store.Store
+	cfg    *config.Config
+	store  *store.Store
+	vision *vision.Service // optional; nil disables the visual stage
 
 	queue chan string
 	wg    sync.WaitGroup
 
-	mu       sync.Mutex
-	subs     map[string]map[chan Event]struct{} // jobID -> subscribers
-	allSubs  map[chan Event]struct{}            // global subscribers (job list page)
+	mu      sync.Mutex
+	subs    map[string]map[chan Event]struct{} // jobID -> subscribers
+	allSubs map[chan Event]struct{}            // global subscribers (job list page)
 }
 
 // Event is what the API streams via SSE.
@@ -56,10 +58,14 @@ type Event struct {
 	Error   string      `json:"error,omitempty"`
 }
 
-func NewManager(cfg *config.Config, st *store.Store) *Manager {
+// NewManager builds a Manager. visionSvc may be nil — when so (or when
+// it reports !Enabled()) the pipeline skips the visual-analysis stage
+// entirely and behaves identically to the pre-VLM build.
+func NewManager(cfg *config.Config, st *store.Store, visionSvc *vision.Service) *Manager {
 	return &Manager{
 		cfg:     cfg,
 		store:   st,
+		vision:  visionSvc,
 		queue:   make(chan string, 32),
 		subs:    map[string]map[chan Event]struct{}{},
 		allSubs: map[chan Event]struct{}{},
@@ -144,7 +150,16 @@ func (m *Manager) run(parent context.Context, id string) {
 	}
 
 	// 1. Download.
-	dlRes, err := ytdlp.Download(ctx, m.cfg, job.URL, m.cfg.DownloadsDir, func(line string) {
+	//
+	// Pick the format up-front based on whether the visual stage will
+	// run for this job: audio-only keeps downloads tiny when VLM is
+	// off, but the keyframe extractor needs a real video stream so we
+	// switch to "best video + best audio" the moment VLM is enabled.
+	format := ytdlp.FormatAudioOnly
+	if m.cfg.VLM.Enabled() {
+		format = ytdlp.FormatVideoPlusAudio
+	}
+	dlRes, err := ytdlp.Download(ctx, m.cfg, job.URL, m.cfg.DownloadsDir, format, func(line string) {
 		m.appendLog(id, store.PhaseDownloading, line)
 		m.emit(id, Event{JobID: id, Phase: store.PhaseDownloading, Message: line})
 	})
@@ -200,14 +215,79 @@ func (m *Manager) run(parent context.Context, id string) {
 		return
 	}
 
+	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.Transcript = res
+	})
+
+	// 4. Visual analysis — best-effort. Any failure here is logged and
+	// the job still completes successfully; the visual stage is a
+	// summary enhancer, not a core deliverable.
+	m.maybeRunVision(ctx, id, dlRes.FilePath)
+
 	finished := time.Now().UTC()
 	_, _ = m.store.Update(id, func(j *store.Job) {
 		j.Phase = store.PhaseDone
-		j.Transcript = res
 		j.FinishedAt = &finished
 		j.Message = "done"
 	})
 	m.emit(id, Event{JobID: id, Phase: store.PhaseDone, Message: "done", Done: true})
+}
+
+// maybeRunVision extracts keyframes and asks the VLM provider to caption
+// each one. It is a no-op when vision is disabled. Errors at any sub-step
+// are logged + emitted as informational events but never propagate to
+// the job phase — the upstream contract is "vision is bonus content".
+func (m *Manager) maybeRunVision(ctx context.Context, id, videoPath string) {
+	if m.vision == nil || !m.vision.Enabled() {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.Phase = store.PhaseAnalyzing
+		j.Message = "extracting keyframes"
+	})
+	m.emit(id, Event{JobID: id, Phase: store.PhaseAnalyzing, Message: "抽取关键帧"})
+
+	framesDir := filepath.Join(m.cfg.FramesDir, id)
+	frames, err := media.ExtractKeyframes(ctx, m.cfg, videoPath, framesDir, media.FrameOptions{
+		SceneThreshold: m.cfg.VLM.SceneThreshold,
+		IntervalSec:    m.cfg.VLM.FrameIntervalSeconds,
+		MaxFrames:      m.cfg.VLM.MaxFrames,
+	})
+	if err != nil {
+		log.Printf("jobs %s: keyframes failed (non-fatal): %v", id, err)
+		m.appendLog(id, store.PhaseAnalyzing, "抽帧失败（不影响整体）："+err.Error())
+		return
+	}
+	if len(frames) == 0 {
+		m.appendLog(id, store.PhaseAnalyzing, "未能从视频抽取关键帧（不影响整体）")
+		return
+	}
+	m.emit(id, Event{
+		JobID:   id,
+		Phase:   store.PhaseAnalyzing,
+		Message: fmt.Sprintf("抽到 %d 帧，开始画面理解", len(frames)),
+	})
+
+	insights, vErr := m.vision.Describe(ctx, frames, func(done, total int) {
+		m.emit(id, Event{
+			JobID:   id,
+			Phase:   store.PhaseAnalyzing,
+			Message: fmt.Sprintf("画面理解 %d/%d", done, total),
+		})
+	})
+	if vErr != nil {
+		log.Printf("jobs %s: vision failed (non-fatal): %v", id, vErr)
+		m.appendLog(id, store.PhaseAnalyzing, "画面理解失败（不影响整体）："+vErr.Error())
+		return
+	}
+	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.FramesDir = framesDir
+		j.Frames = insights
+	})
 }
 
 // Delete removes a finished/failed job along with any media files it
@@ -252,6 +332,18 @@ func (m *Manager) cleanupMedia(j *store.Job) {
 		if err == nil && dirErr == nil && filepath.Dir(abs) == thDir {
 			if err := os.Remove(abs); err != nil && !errors.Is(err, os.ErrNotExist) {
 				log.Printf("jobs: remove thumbnail %s: %v", abs, err)
+			}
+		}
+	}
+	// Frames directory — scoped to FramesDir, same defence-in-depth
+	// as the thumbnail check. We RemoveAll the per-job subdir so the
+	// JPGs + frames.txt sidecar disappear together.
+	if j.FramesDir != "" && m.cfg.FramesDir != "" {
+		abs, err := filepath.Abs(j.FramesDir)
+		frDir, dirErr := filepath.Abs(m.cfg.FramesDir)
+		if err == nil && dirErr == nil && filepath.Dir(abs) == frDir {
+			if err := os.RemoveAll(abs); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("jobs: remove frames %s: %v", abs, err)
 			}
 		}
 	}

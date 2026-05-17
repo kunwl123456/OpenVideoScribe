@@ -12,3 +12,4 @@ cmd/server/web_dist/*
 
 # Local LLM provider config (contains API keys; example file ships in repo)
 scribe-llm.json
+scribe-vlm.json

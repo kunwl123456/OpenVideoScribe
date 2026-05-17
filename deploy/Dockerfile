@@ -2,19 +2,23 @@
 #
 # Stage 1: build the React UI into cmd/server/web_dist
 # Stage 2: build the Go binary (which embeds the UI via go:embed)
-# Stage 3: minimal runtime image with ffmpeg + yt-dlp + whisper.cpp
+# Stage 3: build whisper.cpp from source
+# Stage 4: minimal runtime image with ffmpeg + yt-dlp + whisper.cpp
 
 # ---- 1. UI ----------------------------------------------------------
-FROM node:20-bookworm-slim AS ui
+FROM node:22-bookworm-slim AS ui
 WORKDIR /src
-RUN corepack enable
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install -g pnpm@9.15.5
 COPY web/package.json web/pnpm-lock.yaml* ./web/
-RUN cd web && pnpm install --frozen-lockfile || pnpm install
+RUN cd web && pnpm config set registry https://registry.npmmirror.com && \
+    (pnpm install --frozen-lockfile || pnpm install)
 COPY . .
 RUN cd web && pnpm run build
 
 # ---- 2. Go server ---------------------------------------------------
 FROM golang:1.23-bookworm AS gobuild
+ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download || true
@@ -27,20 +31,27 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w" \
 # Build whisper-cli from source so we ship a known-good static binary.
 FROM debian:bookworm-slim AS whisper
 ARG WHISPER_REF=master
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates build-essential cmake && \
     rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --branch ${WHISPER_REF} https://github.com/ggerganov/whisper.cpp.git /src/whisper && \
+RUN (git clone --depth 1 --branch ${WHISPER_REF} https://gh-proxy.com/https://github.com/ggerganov/whisper.cpp.git /src/whisper || \
+     git clone --depth 1 --branch ${WHISPER_REF} https://kkgithub.com/ggerganov/whisper.cpp.git /src/whisper || \
+     git clone --depth 1 --branch ${WHISPER_REF} https://github.com/ggerganov/whisper.cpp.git /src/whisper) && \
     cmake -S /src/whisper -B /src/whisper/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF && \
-    cmake --build /src/whisper/build --target whisper-cli --config Release -j
+    cmake --build /src/whisper/build --target whisper-cli --config Release -j$(nproc)
 
 # ---- 4. Runtime -----------------------------------------------------
 FROM debian:bookworm-slim
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates curl python3 python3-pip && \
-    pip3 install --break-system-packages --no-cache-dir yt-dlp && \
+    pip3 install --break-system-packages --no-cache-dir \
+        -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com yt-dlp && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=whisper /src/whisper/build/bin/whisper-cli /usr/local/bin/whisper-cli

@@ -13,6 +13,7 @@ import (
 	"scribe-web/internal/asr"
 	"scribe-web/internal/config"
 	"scribe-web/internal/llm"
+	"scribe-web/internal/vision"
 )
 
 // Kind picks the prompt template. The wire value is exactly the string
@@ -93,6 +94,7 @@ func (s *Service) Generate(ctx context.Context, t *asr.Result, kind Kind, meta M
 		Uploader:        strings.TrimSpace(meta.Uploader),
 		DurationSeconds: int(t.Duration),
 		FullText:        prepared,
+		VisualInsights:  renderVisualInsights(meta.Frames, MaxVisualInsightsChars),
 	}
 	if vars.DurationSeconds == 0 && meta.DurationSeconds > 0 {
 		vars.DurationSeconds = meta.DurationSeconds
@@ -135,10 +137,68 @@ func (s *Service) Generate(ctx context.Context, t *asr.Result, kind Kind, meta M
 // Metadata is the video-level info passed alongside the transcript.
 // We keep it separate from asr.Result so the summary package doesn't
 // import ytdlp — the HTTP layer fills these from job.Source.
+//
+// Frames is the optional per-timestamp visual-analysis output. Pass an
+// empty slice (or nil) to omit the visual block from the LLM prompt;
+// the templates conditionally include it via `{{- if .VisualInsights}}`.
 type Metadata struct {
 	Title           string
 	Uploader        string
 	DurationSeconds int
+	Frames          []vision.Insight
+}
+
+// MaxVisualInsightsChars caps how much visual text we feed the LLM in
+// the dedicated VisualInsights block. Mirrors MaxTranscriptChars but
+// keeps a smaller budget — vision lines are short and noisy lines
+// (failed frames) shouldn't dominate the prompt.
+const MaxVisualInsightsChars = 4000
+
+// renderVisualInsights turns a list of Insights into a per-line block
+// like:
+//
+//	[00:15] 画面：开场幻灯片，写着「大模型 101」  文字：大模型 101
+//	[01:02] 画面：演讲者在白板前  文字：
+//
+// Frames with empty Caption (and no OCR) or with a populated Error are
+// silently dropped — they would only confuse the LLM. When the rendered
+// block exceeds the cap we keep head + tail, mirroring prepareText.
+func renderVisualInsights(frames []vision.Insight, max int) string {
+	if len(frames) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, f := range frames {
+		caption := strings.TrimSpace(f.Caption)
+		ocr := strings.TrimSpace(f.OCRText)
+		if caption == "" && ocr == "" {
+			continue
+		}
+		if strings.HasPrefix(caption, "(画面描述失败)") {
+			continue
+		}
+		ts := vision.FormatTimestamp(f.TimestampSec)
+		b.WriteString(fmt.Sprintf("[%s] 画面：%s", ts, caption))
+		if ocr != "" {
+			b.WriteString("  文字：")
+			b.WriteString(ocr)
+		}
+		b.WriteByte('\n')
+	}
+	rendered := strings.TrimRight(b.String(), "\n")
+	if max <= 0 {
+		return rendered
+	}
+	runes := []rune(rendered)
+	if len(runes) <= max {
+		return rendered
+	}
+	headLen := max * 6 / 10
+	tailLen := max - headLen - 6
+	if tailLen < 0 {
+		tailLen = 0
+	}
+	return string(runes[:headLen]) + "\n……（中段省略）……\n" + string(runes[len(runes)-tailLen:])
 }
 
 // prepareText trims whitespace and (when needed) folds an over-long

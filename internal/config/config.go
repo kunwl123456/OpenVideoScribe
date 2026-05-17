@@ -20,12 +20,14 @@ type Config struct {
 	ModelsDir     string
 	DownloadsDir  string
 	ThumbnailsDir string
+	FramesDir     string
 	WorkDir       string
 	WhisperBin    string
 	FFmpegBin     string
 	YtDlpBin      string
 	ModelBaseURLs []string   // tried in order; first that succeeds wins
 	LLM           *LLMConfig // OpenAI-compatible LLM provider, may be unconfigured
+	VLM           *VLMConfig // OpenAI-compatible vision provider, may be unconfigured
 }
 
 // Load builds a Config from env vars, creating the data directories on
@@ -45,6 +47,7 @@ func Load() (*Config, error) {
 		ModelsDir:     filepath.Join(dataDir, "models"),
 		DownloadsDir:  filepath.Join(dataDir, "downloads"),
 		ThumbnailsDir: filepath.Join(dataDir, "thumbnails"),
+		FramesDir:     filepath.Join(dataDir, "frames"),
 		WorkDir:       filepath.Join(dataDir, "work"),
 		WhisperBin:    envOr("SCRIBE_WHISPER_BIN", ""),
 		FFmpegBin:     envOr("SCRIBE_FFMPEG_BIN", ""),
@@ -52,7 +55,7 @@ func Load() (*Config, error) {
 		ModelBaseURLs: parseModelBaseURLs(os.Getenv("WHISPER_MODEL_BASE_URL")),
 	}
 
-	for _, dir := range []string{c.ModelsDir, c.DownloadsDir, c.ThumbnailsDir, c.WorkDir} {
+	for _, dir := range []string{c.ModelsDir, c.DownloadsDir, c.ThumbnailsDir, c.FramesDir, c.WorkDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -67,6 +70,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.LLM = llm
+
+	vlm, err := loadVLMConfig(c.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	c.VLM = vlm
 
 	return c, nil
 }
@@ -100,8 +109,8 @@ func envOr(key, def string) string {
 // is unset. Order matters: official first, then a known China-friendly
 // mirror so users behind the GFW still succeed without configuration.
 var defaultModelBaseURLs = []string{
-	"https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
 	"https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main",
+	"https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
 }
 
 // parseModelBaseURLs accepts a comma-separated env value and returns

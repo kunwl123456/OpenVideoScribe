@@ -9,6 +9,7 @@ import (
 	"scribe-web/internal/asr"
 	"scribe-web/internal/config"
 	"scribe-web/internal/llm"
+	"scribe-web/internal/vision"
 )
 
 // stubProvider captures the last ChatRequest sent and returns whatever
@@ -212,6 +213,86 @@ func TestEstimateCost_Formatting(t *testing.T) {
 		if txt != tc.want {
 			t.Errorf("EstimateCost(%d,%d) = %q, want %q", tc.p, tc.c, txt, tc.want)
 		}
+	}
+}
+
+func TestGenerate_VisualInsightsInjected(t *testing.T) {
+	stub := &stubProvider{reply: "一句话总结"}
+	svc := New(stub, nil)
+	meta := Metadata{
+		Title: "T",
+		Frames: []vision.Insight{
+			{TimestampSec: 5, Caption: "开场幻灯片", OCRText: "大模型 101"},
+			{TimestampSec: 73.4, Caption: "讲师特写"},
+			{TimestampSec: 90, Caption: "(画面描述失败)", Error: "boom"},
+		},
+	}
+	if _, err := svc.Generate(context.Background(), sampleTranscript(), KindBrief, meta); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	user := stub.got.Messages[1].Content
+	if !strings.Contains(user, "画面信息（按时间戳") {
+		t.Fatalf("missing visual block:\n%s", user)
+	}
+	if !strings.Contains(user, "[00:05] 画面：开场幻灯片  文字：大模型 101") {
+		t.Errorf("first frame line missing:\n%s", user)
+	}
+	if !strings.Contains(user, "[01:13] 画面：讲师特写") {
+		t.Errorf("second frame line missing:\n%s", user)
+	}
+	if strings.Contains(user, "画面描述失败") {
+		t.Errorf("failed frame should be dropped:\n%s", user)
+	}
+}
+
+func TestGenerate_NoFramesNoVisualBlock(t *testing.T) {
+	stub := &stubProvider{reply: "一句话"}
+	svc := New(stub, nil)
+	if _, err := svc.Generate(context.Background(), sampleTranscript(), KindOutline, Metadata{Title: "T"}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	user := stub.got.Messages[1].Content
+	if strings.Contains(user, "画面信息") {
+		t.Errorf("visual block should be omitted when no frames:\n%s", user)
+	}
+}
+
+func TestRenderVisualInsights_TrimAndDrop(t *testing.T) {
+	out := renderVisualInsights([]vision.Insight{
+		{TimestampSec: 0, Caption: "  spaced  ", OCRText: "  "},
+		{TimestampSec: 10, Caption: "", OCRText: ""},
+		{TimestampSec: 20, Caption: "(画面描述失败)", Error: "x"},
+		{TimestampSec: 30, Caption: "良品", OCRText: "OCR"},
+	}, MaxVisualInsightsChars)
+	if !strings.Contains(out, "[00:00] 画面：spaced") {
+		t.Errorf("space-trimmed caption missing:\n%s", out)
+	}
+	if strings.Contains(out, "[00:10]") {
+		t.Errorf("empty insight should be dropped:\n%s", out)
+	}
+	if strings.Contains(out, "[00:20]") {
+		t.Errorf("failed insight should be dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "[00:30] 画面：良品  文字：OCR") {
+		t.Errorf("good insight missing:\n%s", out)
+	}
+}
+
+func TestRenderVisualInsights_TruncatesAtCap(t *testing.T) {
+	var many []vision.Insight
+	for i := 0; i < 200; i++ {
+		many = append(many, vision.Insight{
+			TimestampSec: float64(i),
+			Caption:      strings.Repeat("文", 50),
+		})
+	}
+	out := renderVisualInsights(many, 1000)
+	runes := []rune(out)
+	if len(runes) > 1020 {
+		t.Errorf("len = %d, want <= ~1020", len(runes))
+	}
+	if !strings.Contains(out, "中段省略") {
+		t.Errorf("missing elision marker")
 	}
 }
 

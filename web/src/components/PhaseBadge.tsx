@@ -5,6 +5,7 @@ const LABELS: Record<Phase, string> = {
   downloading: '下载中',
   extracting: '抽音轨',
   transcribing: '转写中',
+  analyzing: '画面理解',
   done: '完成',
   failed: '失败',
 }

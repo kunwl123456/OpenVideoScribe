@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,12 +72,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	} else {
 		llmInfo["hint"] = "复制 scribe-llm.example.json 为 scribe-llm.json，填入 base_url / api_key / model；或设置 SCRIBE_LLM_API_KEY 等环境变量"
 	}
+	vlmInfo := map[string]any{"enabled": false}
+	if s.cfg.VLM != nil && s.cfg.VLM.Enabled() {
+		red := s.cfg.VLM.Redacted()
+		vlmInfo = map[string]any{
+			"enabled":          true,
+			"base_url":         red.BaseURL,
+			"model":            red.Model,
+			"api_key":          red.APIKey,
+			"timeout_s":        red.TimeoutSeconds,
+			"frame_interval_s": red.FrameIntervalSeconds,
+			"scene_threshold":  red.SceneThreshold,
+			"max_frames":       red.MaxFrames,
+			"concurrency":      red.Concurrency,
+		}
+	} else {
+		vlmInfo["hint"] = "可选：复制 scribe-vlm.example.json 为 scribe-vlm.json 启用画面理解"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"time":     time.Now().UTC(),
 		"data_dir": s.cfg.DataDir,
 		"binaries": s.binaryStatus(),
 		"llm":      llmInfo,
+		"vlm":      vlmInfo,
 	})
 }
 
@@ -178,6 +197,8 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		s.handleSummarize(w, r, job)
 	case len(parts) == 2 && parts[1] == "thumbnail":
 		s.handleThumbnail(w, r, job)
+	case len(parts) == 3 && parts[1] == "frames":
+		s.handleFrame(w, r, job, parts[2])
 	default:
 		http.NotFound(w, r)
 	}
@@ -204,6 +225,62 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request, job *st
 	}
 	thDir, err := filepath.Abs(s.cfg.ThumbnailsDir)
 	if err != nil || filepath.Dir(abs) != thDir {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, abs, info.ModTime(), f)
+}
+
+// handleFrame serves one extracted keyframe JPEG identified by its
+// index in job.Frames. Indexes outside the slice answer 404. Same
+// path-traversal defence as handleThumbnail: the file must live
+// directly inside the per-job subdir under cfg.FramesDir.
+func (s *Server) handleFrame(w http.ResponseWriter, r *http.Request, job *store.Job, idxStr string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil || idx < 0 || idx >= len(job.Frames) {
+		http.NotFound(w, r)
+		return
+	}
+	imgPath := job.Frames[idx].ImagePath
+	if imgPath == "" || job.FramesDir == "" || s.cfg.FramesDir == "" {
+		http.NotFound(w, r)
+		return
+	}
+	abs, err := filepath.Abs(imgPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	jobDir, err := filepath.Abs(job.FramesDir)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	framesRoot, err := filepath.Abs(s.cfg.FramesDir)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Two layers of containment:
+	//   1. The image must sit directly inside the job's frames dir.
+	//   2. That job dir must sit directly inside cfg.FramesDir.
+	if filepath.Dir(abs) != jobDir || filepath.Dir(jobDir) != framesRoot {
 		http.NotFound(w, r)
 		return
 	}
@@ -274,7 +351,9 @@ func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request, job *st
 		return
 	}
 
-	meta := summary.Metadata{}
+	meta := summary.Metadata{
+		Frames: job.Frames,
+	}
 	if job.Source != nil {
 		meta.Title = job.Source.Title
 		meta.Uploader = job.Source.Uploader

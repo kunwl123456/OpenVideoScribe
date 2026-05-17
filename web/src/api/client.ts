@@ -22,8 +22,20 @@ export type Phase =
   | 'downloading'
   | 'extracting'
   | 'transcribing'
+  | 'analyzing'
   | 'done'
   | 'failed'
+
+export type FrameInsight = {
+  index: number
+  timestamp_sec: number
+  image_path?: string
+  caption: string
+  ocr_text?: string
+  tokens_used?: number
+  duration_ms?: number
+  error?: string
+}
 
 export type Segment = {
   start: number
@@ -98,6 +110,8 @@ export type Job = {
   source?: SourceInfo
   transcript?: TranscriptResult
   media_path?: string
+  frames_dir?: string
+  frames?: FrameInsight[]
   logs?: LogLine[]
   progress?: Partial<Record<Phase, number>>
   summaries?: Partial<Record<SummaryKind, Summary>>
@@ -196,6 +210,8 @@ export const api = {
   exportURL: (id: string, format: 'srt' | 'md' | 'txt') =>
     `/api/jobs/${encodeURIComponent(id)}/export?format=${format}`,
   thumbnailURL: (id: string) => `/api/jobs/${encodeURIComponent(id)}/thumbnail`,
+  frameURL: (id: string, index: number) =>
+    `/api/jobs/${encodeURIComponent(id)}/frames/${index}`,
 }
 
 // streamJob opens an SSE connection. Returns a closer.

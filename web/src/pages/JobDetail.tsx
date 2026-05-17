@@ -26,11 +26,12 @@ const PHASE_LABEL: Record<Phase, string> = {
   downloading: '下载中',
   extracting: '抽取音频',
   transcribing: '转写中',
+  analyzing: '画面理解',
   done: '已完成',
   failed: '失败',
 }
 
-const IN_FLIGHT_PHASES: Phase[] = ['queued', 'downloading', 'extracting', 'transcribing']
+const IN_FLIGHT_PHASES: Phase[] = ['queued', 'downloading', 'extracting', 'transcribing', 'analyzing']
 
 type Tab =
   | 'brief'
