@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"scribe-web/internal/asr"
+	"scribe-web/internal/vision"
 	"scribe-web/internal/ytdlp"
 )
 
@@ -26,8 +27,13 @@ const (
 	PhaseDownloading  Phase = "downloading"
 	PhaseExtracting   Phase = "extracting"
 	PhaseTranscribing Phase = "transcribing"
-	PhaseDone         Phase = "done"
-	PhaseFailed       Phase = "failed"
+	// PhaseAnalyzing covers keyframe extraction + per-frame VLM
+	// description. It only fires when the visual stage is configured
+	// (cfg.VLM.Enabled()); otherwise jobs jump from PhaseTranscribing
+	// straight to PhaseDone.
+	PhaseAnalyzing Phase = "analyzing"
+	PhaseDone      Phase = "done"
+	PhaseFailed    Phase = "failed"
 )
 
 // Job is the canonical record persisted on disk.
@@ -46,10 +52,18 @@ type Job struct {
 	Transcript    *asr.Result              `json:"transcript,omitempty"`
 	MediaPath     string                   `json:"media_path,omitempty"`
 	ThumbnailPath string                   `json:"thumbnail_path,omitempty"`
-	Logs          []LogLine                `json:"logs,omitempty"`
-	Progress      map[Phase]int            `json:"progress,omitempty"` // 0..100 per phase
-	SimplifiedAt  *time.Time               `json:"simplified_at,omitempty"`
-	Summaries     map[string]*SummaryEntry `json:"summaries,omitempty"` // key is summary.Kind string
+	// FramesDir is the per-job directory holding extracted keyframe
+	// JPGs + ffmpeg's metadata sidecar. Empty when the visual stage
+	// hasn't run for this job (vision disabled or skipped).
+	FramesDir string `json:"frames_dir,omitempty"`
+	// Frames are the per-timestamp visual insights produced by the
+	// VLM stage. Sorted by TimestampSec ascending; empty when visual
+	// stage didn't run or yielded nothing.
+	Frames       []vision.Insight         `json:"frames,omitempty"`
+	Logs         []LogLine                `json:"logs,omitempty"`
+	Progress     map[Phase]int            `json:"progress,omitempty"` // 0..100 per phase
+	SimplifiedAt *time.Time               `json:"simplified_at,omitempty"`
+	Summaries    map[string]*SummaryEntry `json:"summaries,omitempty"` // key is summary.Kind string
 }
 
 // SummaryStatus tracks the lifecycle of one summary artefact. Persisted
@@ -117,10 +131,59 @@ func New(dataDir string) (*Store, error) {
 	if n := s.migrateSimplifiedLocked(); n > 0 {
 		log.Printf("store: migrated %d transcript(s) to simplified Chinese", n)
 	}
+	if n := s.recoverStaleJobsLocked(); n > 0 {
+		log.Printf("store: job recovery — marked %d zombie job(s) as failed (server restart while running)", n)
+	}
 	if legacy, stale := s.recoverStaleSummariesLocked(); legacy+stale > 0 {
 		log.Printf("store: summary recovery — promoted %d legacy entr(ies) to done, marked %d stale pending as failed", legacy, stale)
 	}
 	return s, nil
+}
+
+// recoverStaleJobsLocked finalises any job whose phase indicates it
+// was running when the server died. The previous goroutine is gone
+// and we don't support crash-resume, so the only honest thing to do
+// is mark them failed — otherwise the UI shows them spinning forever.
+//
+// Mirrors recoverStaleSummariesLocked: every transition is persisted
+// to disk so memory and storage stay consistent across restarts, and
+// the UI gets a real FinishedAt + a final log line explaining what
+// happened.
+//
+// Called from New() before the store is exposed, so the public mutex
+// is not held.
+func (s *Store) recoverStaleJobsLocked() int {
+	now := time.Now().UTC()
+	var n int
+	for _, j := range s.jobs {
+		if j.Phase == PhaseDone || j.Phase == PhaseFailed {
+			continue
+		}
+		prev := j.Phase
+		j.Phase = PhaseFailed
+		if j.Error == "" {
+			if prev == "" {
+				j.Error = "interrupted (server restarted)"
+			} else {
+				j.Error = fmt.Sprintf("interrupted (server restarted while %s)", prev)
+			}
+		}
+		if j.FinishedAt == nil {
+			t := now
+			j.FinishedAt = &t
+		}
+		j.Logs = append(j.Logs, LogLine{
+			At:      now,
+			Phase:   PhaseFailed,
+			Message: "服务重启，任务被中断",
+		})
+		if err := s.persistLocked(j); err != nil {
+			log.Printf("store: persist stale job recovery for %s: %v", j.ID, err)
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // migrateSimplifiedLocked walks every loaded job and rewrites any
@@ -172,14 +235,6 @@ func (s *Store) loadAll() error {
 		var j Job
 		if err := json.Unmarshal(raw, &j); err != nil {
 			continue
-		}
-		// Anything that was mid-flight when the server died is treated
-		// as failed; we don't have crash-resume yet.
-		if j.Phase != PhaseDone && j.Phase != PhaseFailed {
-			j.Phase = PhaseFailed
-			if j.Error == "" {
-				j.Error = "interrupted (server restarted)"
-			}
 		}
 		s.jobs[j.ID] = &j
 	}
