@@ -8,67 +8,14 @@ Go HTTP 服务 + 嵌入式 React 前端，单二进制部署，目标 Linux 服�
 
 ## 功能
 
-- 粘贴 URL 自动下载、抽音、Whisper 转写（默认输出简体中文）
-- SSE 实时进度（下载 / 抽音 / 转写 / 画面理解）
-- 4 个 AI 视图：AI 总结 / 详细摘要 / 大纲 / 思维导图（页面内渲染脑图）
-- **画面理解（VLM，可选）**：抽关键帧 → 视觉模型描述画面 + OCR → 自动并入 AI 摘要；BIBIGPT 同款思路，默认指向 Doubao Seed Vision，详见 [视觉理解（可选）](#视觉理解可选)
-- 服务重启不丢任务：进行中的任务会在启动时被标记为「中断」而非永远卡死
-- 视频元信息：播放 / 点赞 / 评论 / 收藏 / 封面 / 时长
-- 历史记录卡片，可删除（同时清掉媒体文件）
-- 导出 SRT / Markdown / TXT
-- Whisper 模型网页一键下载，自带 hf-mirror.com fallback
-- 单可执行文件，前端通过 `embed.FS` 内嵌
+- 粘贴 YouTube / B 站等链接，服务端自动下载、抽音、Whisper 转写（默认简体中文）。
+- 网页历史记录、任务进度、视频元信息、封面、删除任务和 SRT / Markdown / TXT 导出。
+- 4 个 AI 视图：AI 总结、详细摘要、大纲、思维导图（页面内 Markmap 渲染）。
+- 可选 VLM 画面理解：抽关键帧，展示截图、时间戳、画面描述、OCR、token、费用和耗时，并把结果融合进 AI 摘要。
+- 模型选择会记住上次选择，Whisper 模型下载内置 hf-mirror.com fallback。
+- 单可执行文件部署，React 前端通过 Go `embed.FS` 内嵌。
 
-不包含：用户系统 / 鉴权 / 多租户（后续版本再加）。
-
-## 架构
-
-```
-┌─────────────┐  POST /api/jobs   ┌──────────────┐
-│  React UI   │ ────────────────▶│  HTTP Server │
-└─────────────┘    SSE events     └──────┬───────┘
-       ▲                                  │
-       │                                  ▼
-       │                           ┌──────────────┐
-       │                           │  Job Worker  │
-       │                           └──────┬───────┘
-       │                                  │
-       │   ┌──────────────────┬───────────┼──────────────────┬──────────────┐
-       │   ▼                  ▼           ▼                  ▼              ▼
-       │ yt-dlp 下载   ffmpeg 抽音  whisper-cli 转写  ffmpeg 抽关键帧   LLM 摘要
-       │  *自动选 audio/video                                │           （融合画面）
-       │   按 VLM 开关切换*                                  ▼
-       │                                              VLM 看图（OCR + 描述）
-       │                                                   │
-       └───────────────────────────────────────────────────┘
-                       files persisted under SCRIBE_DATA_DIR/
-```
-
-> 抽关键帧 + VLM 阶段仅在 `scribe-vlm.json` 已配置时启用，未启用时管线直接从转写跳到 LLM 摘要，整体表现等价于纯 ASR 版本。任何一帧失败都不会让任务挂掉，详见下文 [视觉理解（可选）](#视觉理解可选)。
-
-## 目录结构
-
-```
-scribe-web/
-├── cmd/server/                # Go 入口 + embed:web_dist
-├── internal/
-│   ├── config/                # 路径 + 二进制定位 + 环境变量（llm.go / vlm.go 分别加载两份 JSON）
-│   ├── models/                # Whisper 模型清单 / 下载
-│   ├── media/                 # ffmpeg 抽音 (extract.go) + 关键帧抽取 (frames.go)
-│   ├── asr/                   # whisper-cli 调用
-│   ├── ytdlp/                 # yt-dlp 调用
-│   ├── llm/                   # OpenAI Chat Completions 客户端
-│   ├── vlm/                   # OpenAI Vision Chat Completions 客户端（图文 wire types）
-│   ├── vision/                # 抽帧 → VLM 看图 → Insight，带并发控制
-│   ├── summary/               # 4 个 prompt 模板 + LLM 调用，融合 VisualInsights
-│   ├── store/                 # JSON 文件持久化任务
-│   ├── jobs/                  # 任务队列 + pipeline + 事件 fan-out
-│   └── httpapi/               # REST + SSE 路由
-├── web/                       # React + Vite 前端
-├── deploy/                    # Dockerfile + docker-compose
-├── scripts/                   # Linux 安装辅助脚本
-└── README.md
-```
+不包含：用户系统、鉴权、多租户（后续版本再加）。
 
 ## 部署
 
@@ -100,30 +47,25 @@ go build -o bin/scribe-web ./cmd/server
 
 只调前端时另开一个 `cd web && pnpm run dev`（:5174，自动代理 /api）。
 
-## LLM 配置
+## AI 配置
 
-把 `scribe-llm.example.json` 复制成 `scribe-llm.json`（项目根或 `<data_dir>/`），填 `api_key` + `model`。默认指向火山方舟（Doubao），改 `base_url` 即可接 DeepSeek / OpenAI / 自托管 vLLM 等任意 OpenAI-compatible endpoint。也可用环境变量 `SCRIBE_LLM_API_KEY` / `SCRIBE_LLM_MODEL` 覆盖。
+两个配置文件都支持放在项目根或 `<data_dir>/`，也支持对应环境变量覆盖。真实配置已写入 `.gitignore`，不要提交。
 
-不配 = 4 个 AI 视图禁用，但视频转写本身仍然可用。`scribe-llm.json` 已加进 `.gitignore`，不会被提交。
+- `scribe-llm.json`：文本 LLM，用于 AI 总结 / 详细摘要 / 大纲 / 思维导图。不配置时只禁用 AI 视图，转写仍可用。
+- `scribe-vlm.json`：视觉 VLM，用于关键帧画面理解。开启后会多跑“抽帧 → VLM 看图/OCR”阶段，并在 `画面理解` tab 完整展示结果。
 
-## 视觉理解（可选）
+VLM 展示内容包括：关键帧截图、时间戳、画面描述、OCR、token、估算费用和耗时。后续生成 AI 摘要时会融合这些画面信息；如果摘要早于 VLM 完成，可点击重新生成得到视觉增强版。
 
-参考 BIBIGPT 的做法，在转写之后追加一段 **关键帧抽取 → VLM 看图 → 把画面描述并入 LLM 摘要** 的流水线。开启后，4 个 AI 视图自动获得画面信息（PPT 文字、画面氛围、关键截图描述等），不需要新增 kind。
+常用 VLM 参数：
 
-启用方式：把 `scribe-vlm.example.json` 复制成 `scribe-vlm.json`（项目根或 `<data_dir>/`），填 `api_key` + `model`。推荐模型 `doubao-seed-1-6-vision-250815`。也可用环境变量 `SCRIBE_VLM_API_KEY` / `SCRIBE_VLM_MODEL` 覆盖。
+| 字段 | 说明 |
+| --- | --- |
+| `frame_interval_seconds` | 兜底抽帧间隔，避免讲座类视频没有场景切换时漏帧 |
+| `scene_threshold` | ffmpeg 场景切换阈值，0.3–0.5 常用；0 表示只按 interval 抽帧 |
+| `max_frames` | 每个任务最多分析多少帧，用作成本闸门 |
+| `concurrency` | 同一任务并发 VLM 调用数，太高容易触发限流 |
 
-关键参数（其余字段含义与 `scribe-llm.json` 一致）：
-
-| 字段 | 默认 | 含义 |
-| --- | --- | --- |
-| `frame_interval_seconds` | 15 | 兜底间隔：相邻两帧最小时间间隔（秒），保证讲座类视频也有最低密度 |
-| `scene_threshold` | 0.4 | ffmpeg 场景切换阈值，0.3–0.5 之间；0 关闭场景检测，纯按 interval 抽帧 |
-| `max_frames` | 60 | 每任务上限（成本闸门）。超出时按时间均匀下采样 |
-| `concurrency` | 4 | 同一任务并发 VLM 调用数，太高易被上游限流 |
-
-关闭方式：删除 / 重命名 `scribe-vlm.json` 即可。任何一帧失败、抽帧失败、VLM 限流都不会让任务挂掉，只是该次摘要少了画面信息。
-
-帧图片可以通过 `GET /api/jobs/{id}/frames/{index}` 拉取，前端目前不展示缩略图栏（保持极简 UI），但接口已就绪供后续扩展。
+注意：当前 VLM 阶段仍接在 Whisper 后面执行，长视频可能显著拉长任务完成时间；后续计划改成后台异步分析，不阻塞转写队列。
 
 ## 环境变量
 
@@ -148,5 +90,6 @@ go build -o bin/scribe-web ./cmd/server
 
 ## 路线图
 
-- v0.2：sqlite 持久化、并发 worker、模型断点续传、真实进度百分比
-- v0.3：评论 AI 分析、词表、用户系统 + 鉴权
+- v0.2：VLM 后台异步化、sqlite 持久化、并发 worker、真实进度百分比
+- v0.3：单视频 RAG 问答、章节摘要、文章视图、评论 AI 分析
+- v0.4：词表、用户系统、鉴权、多租户

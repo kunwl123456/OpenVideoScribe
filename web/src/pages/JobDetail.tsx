@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
   api,
+  FrameInsight,
   Job,
   JobEvent,
   LogLine,
@@ -40,9 +41,10 @@ type Tab =
   | 'mindmap'
   | 'transcript'
   | 'segments'
+  | 'frames'
   | 'logs'
 
-const SUMMARY_TABS: { key: Exclude<Tab, 'transcript' | 'segments' | 'logs'>; label: string }[] = [
+const SUMMARY_TABS: { key: Exclude<Tab, 'transcript' | 'segments' | 'frames' | 'logs'>; label: string }[] = [
   { key: 'brief', label: 'AI 总结' },
   { key: 'detailed', label: '详细摘要' },
   { key: 'outline', label: '大纲' },
@@ -54,6 +56,42 @@ function formatTime(sec: number) {
   const m = Math.floor(sec / 60)
   const s = Math.floor(sec % 60)
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+}
+
+function formatDurationMs(ms: number | undefined): string {
+  if (!ms || !isFinite(ms)) return 'N/A'
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function formatTokens(n: number | undefined): string {
+  if (!n || !isFinite(n)) return 'N/A'
+  return n.toLocaleString('zh-CN')
+}
+
+function formatYuan(v: number): string {
+  if (!isFinite(v) || v <= 0) return '¥0'
+  if (v < 0.01) return `¥${v.toFixed(4)}`
+  if (v < 1) return `¥${v.toFixed(3)}`
+  return `¥${v.toFixed(2)}`
+}
+
+function frameCostText(frame: FrameInsight): string {
+  return frame.estimated_cost_text || 'N/A'
+}
+
+function summarizeFrames(frames: FrameInsight[]) {
+  const totalTokens = frames.reduce((sum, f) => sum + (f.tokens_used || 0), 0)
+  const totalDurationMs = frames.reduce((sum, f) => sum + (f.duration_ms || 0), 0)
+  const pricedFrames = frames.filter((f) => typeof f.estimated_cost === 'number' && f.estimated_cost > 0)
+  const tokenFrames = frames.filter((f) => (f.tokens_used || 0) > 0)
+  const hasCompleteCost = tokenFrames.length > 0 && tokenFrames.every((f) => f.estimated_cost_text)
+  const totalCost = pricedFrames.reduce((sum, f) => sum + (f.estimated_cost || 0), 0)
+  return {
+    totalTokens,
+    totalDurationMs,
+    totalCostText: hasCompleteCost ? formatYuan(totalCost) : 'N/A',
+    costIsNA: !hasCompleteCost,
+  }
 }
 
 // formatCount renders an engagement counter using zh-CN conventions:
@@ -142,6 +180,111 @@ function PosterWithFallback({ jobId, mark }: { jobId: string; mark: string }) {
         loading="lazy"
         onError={() => setFailed(true)}
       />
+    </div>
+  )
+}
+
+function VisualInsightsPanel({ job, logs }: { job: Job; logs: LogLine[] }) {
+  const frames = job.frames ?? []
+  const isAnalyzing = job.phase === 'analyzing'
+  const latestLog = [...logs].reverse().find((l) => l.phase === 'analyzing' && l.message)
+  const totals = summarizeFrames(frames)
+
+  return (
+    <div className="frames-panel">
+      {isAnalyzing && (
+        <div className="frames-status" role="status" aria-live="polite">
+          <div className="frames-status-title">正在进行画面理解…</div>
+          {(job.message || latestLog?.message) && (
+            <div className="frames-status-msg">
+              {job.message ? `当前状态：${job.message}` : null}
+              {job.message && latestLog?.message ? ' · ' : null}
+              {latestLog?.message ? `日志：${latestLog.message}` : null}
+            </div>
+          )}
+        </div>
+      )}
+
+      {frames.length > 0 ? (
+        <>
+          <div className="frames-summary">
+            <div className="frames-summary-item">
+              <span className="k">总帧数</span>
+              <span className="v">{frames.length}</span>
+            </div>
+            <div className="frames-summary-item">
+              <span className="k">总 Token</span>
+              <span className="v">{formatTokens(totals.totalTokens)}</span>
+            </div>
+            <div className="frames-summary-item">
+              <span className="k">总估算费用</span>
+              <span className="v">{totals.totalCostText}</span>
+            </div>
+            <div className="frames-summary-item">
+              <span className="k">总耗时</span>
+              <span className="v">{formatDurationMs(totals.totalDurationMs)}</span>
+            </div>
+          </div>
+          {totals.costIsNA && (
+            <div className="frames-cost-note">
+              费用 N/A 通常表示 VLM 未返回 prompt/completion tokens，或 `scribe-vlm.json` 未配置输入/输出单价。
+            </div>
+          )}
+          <div className="frames-list">
+            {frames.map((frame) => (
+              <article className="frame-card" key={`${frame.index}-${frame.timestamp_sec}`}>
+                <div className="frame-shot">
+                  <img
+                    src={api.frameURL(job.id, frame.index)}
+                    alt={`关键帧 ${formatTime(frame.timestamp_sec)}`}
+                    loading="lazy"
+                  />
+                </div>
+                <div className="frame-body">
+                  <div className="frame-head">
+                    <span className="frame-time">{formatTime(frame.timestamp_sec)}</span>
+                    <span className="frame-index">Frame #{frame.index + 1}</span>
+                  </div>
+                  <div className="frame-caption">
+                    {frame.caption || '无画面描述'}
+                  </div>
+                  <div className="frame-metrics">
+                    Tokens <b>{formatTokens(frame.tokens_used)}</b>
+                    <span className="dot">·</span>
+                    费用 <b>{frameCostText(frame)}</b>
+                    <span className="dot">·</span>
+                    耗时 <b>{formatDurationMs(frame.duration_ms)}</b>
+                  </div>
+                  {(frame.prompt_tokens || frame.completion_tokens) ? (
+                    <div className="frame-token-detail">
+                      输入 {formatTokens(frame.prompt_tokens)} / 输出 {formatTokens(frame.completion_tokens)}
+                    </div>
+                  ) : (
+                    <div className="frame-token-detail">
+                      无法精确拆分输入/输出 token，费用显示为 N/A。
+                    </div>
+                  )}
+                  {frame.ocr_text && (
+                    <div className="frame-ocr">
+                      <div className="frame-ocr-title">OCR 文本</div>
+                      <pre>{frame.ocr_text}</pre>
+                    </div>
+                  )}
+                  {frame.error && (
+                    <div className="frame-error">失败信息：{frame.error}</div>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
+      ) : (
+        !isAnalyzing && (
+          <div className="empty">
+            本任务没有画面理解结果；可能是 VLM 未配置、视频没有可抽帧画面，或该任务在 VLM 功能上线前生成。
+          </div>
+        )
+      )}
     </div>
   )
 }
@@ -425,6 +568,10 @@ export default function JobDetail() {
             <span className="tab-sep" />
             <button className={`tab ${tab === 'transcript' ? 'active' : ''}`} onClick={() => setTab('transcript')}>正文</button>
             <button className={`tab ${tab === 'segments' ? 'active' : ''}`} onClick={() => setTab('segments')}>分段</button>
+            <button className={`tab ${tab === 'frames' ? 'active' : ''}`} onClick={() => setTab('frames')}>
+              画面理解
+              {(j.frames?.length ?? 0) > 0 && <span className="tab-dot" />}
+            </button>
             <button className={`tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>日志</button>
           </div>
 
@@ -443,6 +590,7 @@ export default function JobDetail() {
               <SummaryPanel
                 kind={tab}
                 entry={entry}
+                framesCount={j.frames?.length ?? 0}
                 dispatchError={dispatch ?? null}
                 onGenerate={() => generateSummary(tab as SummaryKind)}
               />
@@ -462,6 +610,9 @@ export default function JobDetail() {
                 </div>
               ))}
             </div>
+          )}
+          {tab === 'frames' && (
+            <VisualInsightsPanel job={j} logs={combinedLogs} />
           )}
           {tab === 'logs' && (
             <div className="logs" ref={logsRef}>

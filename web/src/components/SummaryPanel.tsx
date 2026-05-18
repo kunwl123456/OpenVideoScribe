@@ -17,6 +17,7 @@ import MindmapView from './MindmapView'
 type Props = {
   kind: SummaryKind
   entry?: Summary
+  framesCount: number
   dispatchError: { error: string; hint: string | null } | null
   onGenerate: () => void
 }
@@ -28,13 +29,19 @@ const KIND_HINTS: Record<SummaryKind, string> = {
   mindmap: '可视化思维导图，可拖拽 / 缩放查看',
 }
 
-export default function SummaryPanel({ kind, entry, dispatchError, onGenerate }: Props) {
+export default function SummaryPanel({ kind, entry, framesCount, dispatchError, onGenerate }: Props) {
   const [copied, setCopied] = useState(false)
 
   const status = entry?.status
   const isPending = status === 'pending'
   const isDone = status === 'done' && !!entry?.markdown
   const isFailed = status === 'failed'
+  const visualHint = framesCount > 0 ? (
+    <div className="summary-visual-hint">
+      本次 AI 总结会融合 {framesCount} 条画面理解结果。
+      若画面理解是在摘要之后完成，请点击重新生成以融合画面信息。
+    </div>
+  ) : null
 
   async function copy() {
     if (!entry?.markdown) return
@@ -51,6 +58,7 @@ export default function SummaryPanel({ kind, entry, dispatchError, onGenerate }:
   if (isDone && entry) {
     return (
       <div className="summary-panel">
+        {visualHint}
         <div className="summary-meta">
           <span className="summary-meta-item">
             模型 <b>{entry.model || '—'}</b>
@@ -127,6 +135,7 @@ export default function SummaryPanel({ kind, entry, dispatchError, onGenerate }:
         {isFailed ? (
           <>
             <div className="summary-empty-title">{kindLabel(kind)} 生成失败</div>
+            {visualHint}
             <div className="summary-empty-hint">{entry?.error || '请重试'}</div>
             <button
               type="button"
@@ -142,6 +151,7 @@ export default function SummaryPanel({ kind, entry, dispatchError, onGenerate }:
             <div className="summary-empty-title">
               {isPending ? `正在生成${kindLabel(kind)}…` : `还没生成${kindLabel(kind)}`}
             </div>
+            {visualHint}
             <div className="summary-empty-hint">{KIND_HINTS[kind]}</div>
             <button
               type="button"

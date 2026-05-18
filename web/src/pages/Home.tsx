@@ -4,21 +4,51 @@ import { api, Job, ModelStatus, ModelProgress } from '../api/client'
 import Brand from '../components/Brand'
 import PhaseBadge from '../components/PhaseBadge'
 
+const MODEL_STORAGE_KEY = 'scribe-web:model'
+const LANGUAGE_STORAGE_KEY = 'scribe-web:language'
+const DEFAULT_MODEL = 'tiny'
+const DEFAULT_LANGUAGE = 'auto'
+const MODEL_OPTIONS = [
+  { key: 'tiny', label: 'Tiny' },
+  { key: 'base', label: 'Base' },
+  { key: 'small', label: 'Small' },
+  { key: 'medium', label: 'Medium' },
+]
+const VALID_MODEL_KEYS = new Set(MODEL_OPTIONS.map((m) => m.key))
+const VALID_LANGUAGE_KEYS = new Set(['auto', 'zh', 'en', 'ja'])
+
+function readStoredValue(key: string, allowedValues: Set<string>, defaultValue: string): string {
+  try {
+    const value = window.localStorage.getItem(key)
+    return value && allowedValues.has(value) ? value : defaultValue
+  } catch {
+    return defaultValue
+  }
+}
+
+function writeStoredValue(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // Ignore storage failures so private browsing or blocked storage does not break the form.
+  }
+}
+
 export default function Home() {
   const nav = useNavigate()
   const [url, setUrl] = useState('')
-  const [model, setModel] = useState('base')
-  const [language, setLanguage] = useState('auto')
+  const [model, setModel] = useState(() =>
+    readStoredValue(MODEL_STORAGE_KEY, VALID_MODEL_KEYS, DEFAULT_MODEL),
+  )
+  const [language, setLanguage] = useState(() =>
+    readStoredValue(LANGUAGE_STORAGE_KEY, VALID_LANGUAGE_KEYS, DEFAULT_LANGUAGE),
+  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [models, setModels] = useState<ModelStatus[]>([])
   const [progress, setProgress] = useState<Record<string, ModelProgress>>({})
   const [jobs, setJobs] = useState<Job[]>([])
   const [modelsCollapsed, setModelsCollapsed] = useState(true)
-  // Only auto-snap to the first installed model once, on initial load.
-  // Otherwise the 3s poller would keep yanking the user out of a model
-  // they deliberately picked to download.
-  const [modelPicked, setModelPicked] = useState(false)
 
   async function refreshModels() {
     try {
@@ -27,17 +57,14 @@ export default function Home() {
       const pmap: Record<string, ModelProgress> = {}
       for (const p of res.progress ?? []) pmap[p.key] = p
       setProgress(pmap)
-      if (!modelPicked) {
-        const firstInstalled = res.models?.find((m) => m.installed)
-        const currentInstalled = res.models?.find((m) => m.key === model)?.installed
-        if (firstInstalled && !currentInstalled) {
-          setModel(firstInstalled.key)
-        }
-        setModelPicked(true)
-      }
     } catch (e) {
       console.warn('listModels failed', e)
     }
+  }
+
+  function updateLanguage(nextLanguage: string) {
+    setLanguage(nextLanguage)
+    writeStoredValue(LANGUAGE_STORAGE_KEY, nextLanguage)
   }
 
   async function refreshJobs() {
@@ -101,7 +128,7 @@ export default function Home() {
   // while a download is already running is a safe no-op.
   function handleModelChange(key: string) {
     setModel(key)
-    setModelPicked(true)
+    writeStoredValue(MODEL_STORAGE_KEY, key)
     const m = models.find((x) => x.key === key)
     if (m && !m.installed) {
       const p = progress[key]
@@ -171,16 +198,19 @@ export default function Home() {
               value={model}
               onChange={(e) => handleModelChange(e.target.value)}
             >
-              {models.map((m) => (
-                <option key={m.key} value={m.key}>
-                  {m.label} {m.installed ? '' : '（未下载）'}
-                </option>
-              ))}
+              {MODEL_OPTIONS.map((option) => {
+                const status = models.find((m) => m.key === option.key)
+                return (
+                  <option key={option.key} value={option.key}>
+                    {status?.label ?? option.label} {status && !status.installed ? '（未下载）' : ''}
+                  </option>
+                )
+              })}
             </select>
           </div>
           <div className="hero-option">
             <span className="label">语言</span>
-            <select className="select" value={language} onChange={(e) => setLanguage(e.target.value)}>
+            <select className="select" value={language} onChange={(e) => updateLanguage(e.target.value)}>
               <option value="auto">自动</option>
               <option value="zh">中文</option>
               <option value="en">English</option>

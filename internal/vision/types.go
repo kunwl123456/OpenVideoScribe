@@ -15,12 +15,16 @@ package vision
 // in the frame — used by the summary stage to surface slide content
 // the audio transcript may have missed.
 type Insight struct {
-	Index        int     `json:"index"`
-	TimestampSec float64 `json:"timestamp_sec"`
-	ImagePath    string  `json:"image_path,omitempty"` // absolute path on disk
-	Caption      string  `json:"caption"`
-	OCRText      string  `json:"ocr_text,omitempty"`
-	TokensUsed   int     `json:"tokens_used,omitempty"`
-	DurationMs   int64   `json:"duration_ms,omitempty"`
-	Error        string  `json:"error,omitempty"` // populated when this frame's VLM call failed
+	Index             int     `json:"index"`
+	TimestampSec      float64 `json:"timestamp_sec"`
+	ImagePath         string  `json:"image_path,omitempty"` // absolute path on disk
+	Caption           string  `json:"caption"`
+	OCRText           string  `json:"ocr_text,omitempty"`
+	TokensUsed        int     `json:"tokens_used,omitempty"`
+	PromptTokens      int     `json:"prompt_tokens,omitempty"`
+	CompletionTokens  int     `json:"completion_tokens,omitempty"`
+	EstimatedCost     float64 `json:"estimated_cost,omitempty"`
+	EstimatedCostText string  `json:"estimated_cost_text,omitempty"`
+	DurationMs        int64   `json:"duration_ms,omitempty"`
+	Error             string  `json:"error,omitempty"` // populated when this frame's VLM call failed
 }

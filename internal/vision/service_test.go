@@ -60,7 +60,7 @@ func (s *stubProvider) Chat(_ context.Context, _ vlm.ChatRequest) (*vlm.ChatResp
 	}
 	return &vlm.ChatResponse{
 		Choices: []vlm.ChatChoice{{Message: vlm.AssistantOutput{Role: "assistant", Content: reply}}},
-		Usage:   vlm.ChatUsage{TotalTokens: 10},
+		Usage:   vlm.ChatUsage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10},
 	}, nil
 }
 
@@ -104,10 +104,12 @@ func makeFrames(t *testing.T, n int) []media.Frame {
 
 func enabledCfg(conc int) *config.VLMConfig {
 	return &config.VLMConfig{
-		BaseURL:     "http://stub",
-		APIKey:      "key",
-		Model:       "test-vlm",
-		Concurrency: conc,
+		BaseURL:            "http://stub",
+		APIKey:             "key",
+		Model:              "test-vlm",
+		Concurrency:        conc,
+		PriceInputPerMTok:  2,
+		PriceOutputPerMTok: 4,
 	}
 }
 
@@ -194,6 +196,38 @@ func TestDescribe_PerFrameFailureNotFatal(t *testing.T) {
 	}
 }
 
+func TestDescribe_RecordsUsageAndEstimatedCost(t *testing.T) {
+	stub := &stubProvider{}
+	svc := New(stub, enabledCfg(1))
+	frames := makeFrames(t, 1)
+	insights, err := svc.Describe(context.Background(), frames, nil)
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if len(insights) != 1 {
+		t.Fatalf("insights len = %d", len(insights))
+	}
+	got := insights[0]
+	if got.TokensUsed != 10 || got.PromptTokens != 7 || got.CompletionTokens != 3 {
+		t.Fatalf("usage = total %d prompt %d completion %d, want 10/7/3", got.TokensUsed, got.PromptTokens, got.CompletionTokens)
+	}
+	if got.EstimatedCost <= 0 || got.EstimatedCostText == "" {
+		t.Fatalf("estimated cost missing: cost=%v text=%q", got.EstimatedCost, got.EstimatedCostText)
+	}
+}
+
+func TestEstimateCost_NAWhenUsageOrPricingMissing(t *testing.T) {
+	if cost, text := EstimateCost(0, 0, enabledCfg(1)); cost != 0 || text != "" {
+		t.Fatalf("empty usage cost = %v %q, want zero/empty", cost, text)
+	}
+	cfg := enabledCfg(1)
+	cfg.PriceInputPerMTok = 0
+	cfg.PriceOutputPerMTok = 0
+	if cost, text := EstimateCost(7, 3, cfg); cost != 0 || text != "" {
+		t.Fatalf("unpriced cost = %v %q, want zero/empty", cost, text)
+	}
+}
+
 func TestDescribe_TimestampSortedAndIndexed(t *testing.T) {
 	stub := &stubProvider{}
 	svc := New(stub, enabledCfg(8))
@@ -255,10 +289,10 @@ func TestParseReply(t *testing.T) {
 		caption, ocr string
 	}{
 		"画面：开场幻灯片\n文字：标题 大模型 101": {caption: "开场幻灯片", ocr: "标题 大模型 101"},
-		"画面：演讲者特写\n文字：无":              {caption: "演讲者特写", ocr: ""},
-		"画面:ASCII colon\n文字:abc":      {caption: "ASCII colon", ocr: "abc"},
-		"  \n画面：仅画面\n":                 {caption: "仅画面", ocr: ""},
-		"model went off-script":         {caption: "model went off-script", ocr: ""},
+		"画面：演讲者特写\n文字：无":          {caption: "演讲者特写", ocr: ""},
+		"画面:ASCII colon\n文字:abc":  {caption: "ASCII colon", ocr: "abc"},
+		"  \n画面：仅画面\n":            {caption: "仅画面", ocr: ""},
+		"model went off-script":   {caption: "model went off-script", ocr: ""},
 	}
 	for in, want := range cases {
 		c, o := parseReply(in)

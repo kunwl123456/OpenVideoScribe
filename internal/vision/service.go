@@ -157,7 +157,13 @@ func (s *Service) describeOne(ctx context.Context, f media.Frame) Insight {
 		res.Error = err.Error()
 		return res
 	}
+	res.PromptTokens = resp.Usage.PromptTokens
+	res.CompletionTokens = resp.Usage.CompletionTokens
 	res.TokensUsed = resp.Usage.TotalTokens
+	if res.TokensUsed == 0 {
+		res.TokensUsed = res.PromptTokens + res.CompletionTokens
+	}
+	res.EstimatedCost, res.EstimatedCostText = EstimateCost(res.PromptTokens, res.CompletionTokens, s.cfg)
 	caption, ocr := parseReply(resp.Choices[0].Message.Content)
 	res.Caption = caption
 	res.OCRText = ocr

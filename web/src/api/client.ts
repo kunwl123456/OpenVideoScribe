@@ -33,6 +33,10 @@ export type FrameInsight = {
   caption: string
   ocr_text?: string
   tokens_used?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  estimated_cost?: number
+  estimated_cost_text?: string
   duration_ms?: number
   error?: string
 }
