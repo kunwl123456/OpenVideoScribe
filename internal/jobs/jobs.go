@@ -21,6 +21,7 @@ import (
 	"scribe-web/internal/config"
 	"scribe-web/internal/media"
 	"scribe-web/internal/store"
+	"scribe-web/internal/subtitle"
 	"scribe-web/internal/vision"
 	"scribe-web/internal/ytdlp"
 )
@@ -96,7 +97,7 @@ func (m *Manager) Start(ctx context.Context) {
 func (m *Manager) Wait() { m.wg.Wait() }
 
 // Submit creates a new job record + enqueues it.
-func (m *Manager) Submit(url, model, language string) (*store.Job, error) {
+func (m *Manager) Submit(url, model, language string, enableVision bool) (*store.Job, error) {
 	if url == "" {
 		return nil, fmt.Errorf("url required")
 	}
@@ -108,15 +109,16 @@ func (m *Manager) Submit(url, model, language string) (*store.Job, error) {
 		return nil, err
 	}
 	job := &store.Job{
-		ID:        id,
-		URL:       url,
-		Model:     model,
-		Language:  language,
-		Phase:     store.PhaseQueued,
-		CreatedAt: time.Now().UTC(),
-		Progress:  map[store.Phase]int{},
+		ID:           id,
+		URL:          url,
+		Model:        model,
+		Language:     language,
+		EnableVision: enableVision,
+		Phase:        store.PhaseQueued,
+		CreatedAt:    time.Now().UTC(),
+		Progress:     map[store.Phase]int{},
 	}
-	if m.visionEnabled() {
+	if m.jobVisionEnabled(job) {
 		job.VisionStatus = store.VisionPending
 		job.VisionMessage = "等待转写完成后进行画面理解"
 	} else {
@@ -161,11 +163,11 @@ func (m *Manager) run(parent context.Context, id string) {
 	// 1. Download.
 	//
 	// Pick the format up-front based on whether the visual stage will
-	// run for this job: audio-only keeps downloads tiny when VLM is
-	// off, but the keyframe extractor needs a real video stream so we
-	// switch to "best video + best audio" the moment VLM is enabled.
+	// run for this job: audio-only keeps downloads tiny when VLM is off
+	// or unchecked, but the keyframe extractor needs a real video stream.
+	jobVisionEnabled := m.jobVisionEnabled(job)
 	format := ytdlp.FormatAudioOnly
-	if m.visionEnabled() {
+	if jobVisionEnabled {
 		format = ytdlp.FormatVideoPlusAudio
 	}
 	dlRes, err := ytdlp.Download(ctx, m.cfg, job.URL, m.cfg.DownloadsDir, format, func(line string) {
@@ -192,45 +194,59 @@ func (m *Manager) run(parent context.Context, id string) {
 		})
 	}
 
-	// 2. Extract audio.
-	_, _ = m.store.Update(id, func(j *store.Job) {
-		j.Phase = store.PhaseExtracting
-		j.Message = "extracting audio"
-	})
-	m.emit(id, Event{JobID: id, Phase: store.PhaseExtracting, Message: "extracting audio"})
-	wav, err := media.ExtractAudio(ctx, m.cfg, dlRes.FilePath, m.cfg.WorkDir)
-	if err != nil {
-		m.fail(id, fmt.Errorf("extract: %w", err))
-		return
-	}
-
-	// 3. Transcribe.
+	// 2. Prefer platform-provided subtitles. If none are available, fall
+	// back to the historical ffmpeg + Whisper ASR path.
 	_, _ = m.store.Update(id, func(j *store.Job) {
 		j.Phase = store.PhaseTranscribing
-		j.Message = "transcribing"
+		j.Message = "checking platform subtitles"
 	})
-	m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: "transcribing"})
-	res, err := asr.Transcribe(ctx, m.cfg, asr.Request{
-		AudioPath: wav,
-		Model:     job.Model,
-		Language:  job.Language,
-		OnProgress: func(msg string) {
-			m.appendLog(id, store.PhaseTranscribing, msg)
-			m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
-		},
-	})
-	if err != nil {
-		m.fail(id, fmt.Errorf("transcribe: %w", err))
-		return
+	m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: "checking platform subtitles"})
+	res, transcriptSource, subErr := m.tryPlatformSubtitle(ctx, id, job, dlRes.Info.ID)
+	if subErr != nil {
+		m.appendLog(id, store.PhaseTranscribing, "未找到可用平台字幕，回退 Whisper ASR："+subErr.Error())
+
+		// 2b. Extract audio.
+		_, _ = m.store.Update(id, func(j *store.Job) {
+			j.Phase = store.PhaseExtracting
+			j.Message = "extracting audio"
+		})
+		m.emit(id, Event{JobID: id, Phase: store.PhaseExtracting, Message: "extracting audio"})
+		wav, err := media.ExtractAudio(ctx, m.cfg, dlRes.FilePath, m.cfg.WorkDir)
+		if err != nil {
+			m.fail(id, fmt.Errorf("extract: %w", err))
+			return
+		}
+
+		// 3. Transcribe with Whisper.
+		_, _ = m.store.Update(id, func(j *store.Job) {
+			j.Phase = store.PhaseTranscribing
+			j.Message = "transcribing"
+		})
+		m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: "transcribing"})
+		res, err = asr.Transcribe(ctx, m.cfg, asr.Request{
+			AudioPath: wav,
+			Model:     job.Model,
+			Language:  job.Language,
+			OnProgress: func(msg string) {
+				m.appendLog(id, store.PhaseTranscribing, msg)
+				m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
+			},
+		})
+		if err != nil {
+			m.fail(id, fmt.Errorf("transcribe: %w", err))
+			return
+		}
+		transcriptSource = "whisper_asr"
 	}
 
 	finished := time.Now().UTC()
 	_, _ = m.store.Update(id, func(j *store.Job) {
 		j.Transcript = res
+		j.TranscriptSource = transcriptSource
 		j.Phase = store.PhaseDone
 		j.FinishedAt = &finished
 		j.Message = "done"
-		if m.visionEnabled() {
+		if jobVisionEnabled {
 			j.VisionStatus = store.VisionPending
 			j.VisionMessage = "画面理解将在后台继续进行"
 		}
@@ -240,9 +256,27 @@ func (m *Manager) run(parent context.Context, id string) {
 	// 4. Visual analysis — detached best-effort enhancer. It deliberately
 	// uses a background context so the main worker can return immediately
 	// and pick up the next queued transcription job.
-	if m.visionEnabled() {
+	if jobVisionEnabled {
 		go m.runVision(context.Background(), id, dlRes.FilePath)
 	}
+}
+
+func (m *Manager) tryPlatformSubtitle(ctx context.Context, id string, job *store.Job, sourceID string) (*asr.Result, string, error) {
+	subDir := filepath.Join(m.cfg.WorkDir, id+"-subtitles")
+	sub, err := ytdlp.DownloadSubtitle(ctx, m.cfg, job.URL, subDir, sourceID, job.Language, func(line string) {
+		m.appendLog(id, store.PhaseTranscribing, line)
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	res, err := subtitle.ParseFile(sub.Path, sub.Language)
+	if err != nil {
+		return nil, "", err
+	}
+	msg := fmt.Sprintf("使用平台字幕（%s，%s）", sub.Language, sub.Kind)
+	m.appendLog(id, store.PhaseTranscribing, msg)
+	m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
+	return res, "platform_subtitle", nil
 }
 
 // runVision extracts keyframes and asks the VLM provider to caption each
@@ -318,6 +352,10 @@ func (m *Manager) runVision(ctx context.Context, id, videoPath string) {
 
 func (m *Manager) visionEnabled() bool {
 	return m.vision != nil && m.vision.Enabled()
+}
+
+func (m *Manager) jobVisionEnabled(job *store.Job) bool {
+	return job != nil && job.EnableVision && m.visionEnabled()
 }
 
 func (m *Manager) finishVision(id, framesDir string, insights []vision.Insight, msg string) {

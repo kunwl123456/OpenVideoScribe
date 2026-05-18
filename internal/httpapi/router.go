@@ -143,15 +143,16 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"jobs": s.store.List()})
 	case http.MethodPost:
 		var body struct {
-			URL      string `json:"url"`
-			Model    string `json:"model"`
-			Language string `json:"language"`
+			URL          string `json:"url"`
+			Model        string `json:"model"`
+			Language     string `json:"language"`
+			EnableVision bool   `json:"enable_vision"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		j, err := s.jobs.Submit(strings.TrimSpace(body.URL), body.Model, body.Language)
+		j, err := s.jobs.Submit(strings.TrimSpace(body.URL), body.Model, body.Language, body.EnableVision)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

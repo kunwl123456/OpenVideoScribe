@@ -54,6 +54,7 @@ type Job struct {
 	URL              string       `json:"url"`
 	Model            string       `json:"model"`
 	Language         string       `json:"language"`
+	EnableVision     bool         `json:"enable_vision,omitempty"`
 	Phase            Phase        `json:"phase"`
 	Message          string       `json:"message,omitempty"`
 	Error            string       `json:"error,omitempty"`
@@ -62,6 +63,7 @@ type Job struct {
 	FinishedAt       *time.Time   `json:"finished_at,omitempty"`
 	Source           *ytdlp.Info  `json:"source,omitempty"`
 	Transcript       *asr.Result  `json:"transcript,omitempty"`
+	TranscriptSource string       `json:"transcript_source,omitempty"`
 	MediaPath        string       `json:"media_path,omitempty"`
 	ThumbnailPath    string       `json:"thumbnail_path,omitempty"`
 	VisionStatus     VisionStatus `json:"vision_status,omitempty"`

@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -8,7 +9,14 @@ import (
 	"scribe-web/internal/config"
 	"scribe-web/internal/store"
 	"scribe-web/internal/vision"
+	"scribe-web/internal/vlm"
 )
+
+type stubVisionProvider struct{}
+
+func (stubVisionProvider) Chat(context.Context, vlm.ChatRequest) (*vlm.ChatResponse, error) {
+	return nil, nil
+}
 
 func TestVisionCompletionDoesNotChangeMainPhase(t *testing.T) {
 	st, err := store.New(t.TempDir())
@@ -81,5 +89,44 @@ func TestVisionFailureDoesNotChangeMainPhase(t *testing.T) {
 	}
 	if got.VisionError != "vlm timeout" {
 		t.Fatalf("vision error = %q, want vlm timeout", got.VisionError)
+	}
+}
+
+func TestJobVisionEnabledRequiresPerJobOptIn(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	vs := vision.New(stubVisionProvider{}, &config.VLMConfig{
+		BaseURL: "http://example.invalid",
+		APIKey:  "key",
+		Model:   "vision-model",
+	})
+	m := NewManager(&config.Config{}, st, vs)
+
+	if m.jobVisionEnabled(&store.Job{EnableVision: false}) {
+		t.Fatal("vision enabled for unchecked job")
+	}
+	if !m.jobVisionEnabled(&store.Job{EnableVision: true}) {
+		t.Fatal("vision disabled for checked job with configured service")
+	}
+}
+
+func TestSubmitStoresUncheckedVisionAsDisabled(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	m := NewManager(&config.Config{}, st, nil)
+
+	job, err := m.Submit("https://example.com/video", "tiny", "auto", false)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if job.EnableVision {
+		t.Fatal("EnableVision = true, want false")
+	}
+	if job.VisionStatus != store.VisionDisabled {
+		t.Fatalf("VisionStatus = %s, want disabled", job.VisionStatus)
 	}
 }

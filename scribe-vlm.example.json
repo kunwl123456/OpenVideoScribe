@@ -1,5 +1,5 @@
 {
-  "_comment": "OPTIONAL. Copy this file to scribe-vlm.json (project root or <data_dir>), then fill in api_key and model. When the file is absent or api_key/model are empty, the visual-analysis stage is silently skipped and the pipeline behaves identically to the pre-VLM build (transcript + LLM summary only). Defaults target 火山方舟 Doubao Vision; any OpenAI-vision-compatible provider works — point base_url at it.",
+  "_comment": "OPTIONAL. Copy this file to scribe-vlm.json (project root or <data_dir>), then fill in api_key and model. When configured, the home page shows a per-job VLM checkbox; unchecked jobs skip visual analysis and keep the fast transcript-only pipeline. Defaults target 火山方舟 Doubao Vision; any OpenAI-vision-compatible provider works — point base_url at it.",
 
   "base_url": "https://ark.cn-beijing.volces.com/api/v3",
   "api_key": "REPLACE_WITH_YOUR_ARK_API_KEY",

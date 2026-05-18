@@ -6,6 +6,7 @@ import PhaseBadge from '../components/PhaseBadge'
 
 const MODEL_STORAGE_KEY = 'scribe-web:model'
 const LANGUAGE_STORAGE_KEY = 'scribe-web:language'
+const VISION_STORAGE_KEY = 'scribe-web:enable-vision'
 const DEFAULT_MODEL = 'tiny'
 const DEFAULT_LANGUAGE = 'auto'
 const MODEL_OPTIONS = [
@@ -34,6 +35,25 @@ function writeStoredValue(key: string, value: string) {
   }
 }
 
+function readStoredBool(key: string, defaultValue: boolean): boolean {
+  try {
+    const value = window.localStorage.getItem(key)
+    if (value === 'true') return true
+    if (value === 'false') return false
+    return defaultValue
+  } catch {
+    return defaultValue
+  }
+}
+
+function writeStoredBool(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, String(value))
+  } catch {
+    // Ignore storage failures so private browsing or blocked storage does not break the form.
+  }
+}
+
 export default function Home() {
   const nav = useNavigate()
   const [url, setUrl] = useState('')
@@ -49,6 +69,8 @@ export default function Home() {
   const [progress, setProgress] = useState<Record<string, ModelProgress>>({})
   const [jobs, setJobs] = useState<Job[]>([])
   const [modelsCollapsed, setModelsCollapsed] = useState(true)
+  const [vlmEnabled, setVlmEnabled] = useState(false)
+  const [enableVision, setEnableVision] = useState(() => readStoredBool(VISION_STORAGE_KEY, false))
 
   async function refreshModels() {
     try {
@@ -62,9 +84,24 @@ export default function Home() {
     }
   }
 
+  async function refreshHealth() {
+    try {
+      const res = await api.health()
+      setVlmEnabled(!!res.vlm?.enabled)
+    } catch (e) {
+      console.warn('health failed', e)
+      setVlmEnabled(false)
+    }
+  }
+
   function updateLanguage(nextLanguage: string) {
     setLanguage(nextLanguage)
     writeStoredValue(LANGUAGE_STORAGE_KEY, nextLanguage)
+  }
+
+  function updateEnableVision(nextEnableVision: boolean) {
+    setEnableVision(nextEnableVision)
+    writeStoredBool(VISION_STORAGE_KEY, nextEnableVision)
   }
 
   async function refreshJobs() {
@@ -77,6 +114,7 @@ export default function Home() {
   }
 
   useEffect(() => {
+    refreshHealth()
     refreshModels()
     refreshJobs()
     const t = setInterval(() => {
@@ -105,7 +143,12 @@ export default function Home() {
     }
     setSubmitting(true)
     try {
-      const job = await api.createJob({ url: normalized, model, language })
+      const job = await api.createJob({
+        url: normalized,
+        model,
+        language,
+        enable_vision: vlmEnabled && enableVision,
+      })
       nav(`/jobs/${job.id}`)
     } catch (err) {
       setError(String(err))
@@ -217,6 +260,19 @@ export default function Home() {
               <option value="ja">日本語</option>
             </select>
           </div>
+          {vlmEnabled && (
+            <label className="hero-option checkbox-option">
+              <input
+                type="checkbox"
+                checked={enableVision}
+                onChange={(e) => updateEnableVision(e.target.checked)}
+              />
+              <span>
+                画面理解 VLM
+                <small>更慢，会下载视频并抽帧</small>
+              </span>
+            </label>
+          )}
         </div>
         {!selectedReady && selectedModel && (
           <div className="model-inline" style={{ marginTop: 16 }}>

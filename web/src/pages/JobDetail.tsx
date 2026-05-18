@@ -123,6 +123,17 @@ function detectPlatform(url: string): { label: string; cls: string; mark: string
   }
 }
 
+function transcriptSourceLabel(source?: string): string | null {
+  switch (source) {
+    case 'platform_subtitle':
+      return '平台字幕'
+    case 'whisper_asr':
+      return 'Whisper ASR'
+    default:
+      return null
+  }
+}
+
 // JobProgress shows a phase-aware progress bar while a job is still
 // running. The backend currently doesn't write per-phase percentages
 // into `job.progress` (the map is created but never updated mid-flight),
@@ -538,6 +549,12 @@ export default function JobDetail() {
             <span className="k">语言</span>
             <span className="v">{j.language || 'auto'}</span>
           </div>
+          {transcriptSourceLabel(j.transcript_source) && (
+            <div className="video-card-meta-item">
+              <span className="k">文本来源</span>
+              <span className="v">{transcriptSourceLabel(j.transcript_source)}</span>
+            </div>
+          )}
           <div className="video-card-meta-item">
             <span className="k">创建时间</span>
             <span className="v">{new Date(j.created_at).toLocaleString()}</span>

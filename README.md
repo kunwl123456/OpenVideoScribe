@@ -8,10 +8,10 @@ Go HTTP 服务 + 嵌入式 React 前端，单二进制部署，目标 Linux 服�
 
 ## 功能
 
-- 粘贴 YouTube / B 站等链接，服务端自动下载、抽音、Whisper 转写（默认简体中文）。
+- 粘贴 YouTube / B 站等链接，服务端优先读取平台字幕；没有字幕时自动下载、抽音、Whisper 转写（默认简体中文）。
 - 网页历史记录、任务进度、视频元信息、封面、删除任务和 SRT / Markdown / TXT 导出。
 - 4 个 AI 视图：AI 总结、详细摘要、大纲、思维导图（页面内 Markmap 渲染）。
-- 可选 VLM 画面理解：转写完成后在后台异步抽关键帧，不阻塞任务完成和队列，并把结果融合进 AI 摘要。
+- 可勾选 VLM 画面理解：转写完成后在后台异步抽关键帧，不阻塞任务完成和队列，并把结果融合进 AI 摘要。
 - 模型选择会记住上次选择，Whisper 模型下载内置 hf-mirror.com fallback。
 - 单可执行文件部署，React 前端通过 Go `embed.FS` 内嵌。
 
@@ -52,9 +52,9 @@ go build -o bin/scribe-web ./cmd/server
 两个配置文件都支持放在项目根或 `<data_dir>/`，也支持对应环境变量覆盖。真实配置已写入 `.gitignore`，不要提交。
 
 - `scribe-llm.json`：文本 LLM，用于 AI 总结 / 详细摘要 / 大纲 / 思维导图。不配置时只禁用 AI 视图，转写仍可用。
-- `scribe-vlm.json`：视觉 VLM，用于关键帧画面理解。开启后会在转写完成后后台运行“抽帧 → VLM 看图/OCR”，不阻塞导出、总结和下一个转写任务。
+- `scribe-vlm.json`：视觉 VLM，用于关键帧画面理解。配置后首页会出现“画面理解 VLM”选项；只有勾选的任务才会后台运行“抽帧 → VLM 看图/OCR”，不阻塞导出、总结和下一个转写任务。
 
-`画面理解` tab 会展示关键帧截图、时间戳、画面描述、OCR、token、估算费用和耗时。VLM 还在后台运行时，AI 摘要仅基于转写；完成后可点击重新生成得到视觉增强版。
+`画面理解` tab 会展示关键帧截图、时间戳、画面描述、OCR、token、估算费用和耗时。若任务勾选了 VLM 且仍在后台运行，AI 摘要仅基于转写；完成后可点击重新生成得到视觉增强版。
 
 常用 VLM 参数：
 
@@ -78,7 +78,7 @@ go build -o bin/scribe-web ./cmd/server
 
 - `GET  /api/health` 健康检查（含 LLM 配置脱敏）
 - `GET  /api/models` / `POST /api/models/{key}/download`
-- `GET  /api/jobs` / `POST /api/jobs` body: `{"url":"...","model":"base","language":"auto"}`
+- `GET  /api/jobs` / `POST /api/jobs` body: `{"url":"...","model":"base","language":"auto","enable_vision":false}`
 - `GET  /api/jobs/{id}` / `DELETE /api/jobs/{id}`
 - `GET  /api/jobs/{id}/events` SSE（任务 + summary 状态）
 - `GET  /api/jobs/{id}/export?format=srt|md|txt`

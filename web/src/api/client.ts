@@ -17,6 +17,16 @@ export type ModelProgress = {
   error?: string
 }
 
+export type HealthInfo = {
+  status: string
+  vlm?: {
+    enabled?: boolean
+    hint?: string
+    model?: string
+    max_frames?: number
+  }
+}
+
 export type Phase =
   | 'queued'
   | 'downloading'
@@ -120,7 +130,9 @@ export type Job = {
   finished_at?: string
   source?: SourceInfo
   transcript?: TranscriptResult
+  transcript_source?: string
   media_path?: string
+  enable_vision?: boolean
   vision_status?: VisionStatus
   vision_message?: string
   vision_error?: string
@@ -181,6 +193,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  health: () => request<HealthInfo>('/api/health'),
   listModels: () =>
     request<{ models: ModelStatus[]; progress: ModelProgress[] }>('/api/models'),
   downloadModel: (key: string) =>
@@ -188,7 +201,7 @@ export const api = {
       method: 'POST',
     }),
   listJobs: () => request<{ jobs: Job[] }>('/api/jobs'),
-  createJob: (payload: { url: string; model: string; language?: string }) =>
+  createJob: (payload: { url: string; model: string; language?: string; enable_vision?: boolean }) =>
     request<Job>('/api/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   getJob: (id: string) => request<Job>(`/api/jobs/${encodeURIComponent(id)}`),
   deleteJob: (id: string) =>
