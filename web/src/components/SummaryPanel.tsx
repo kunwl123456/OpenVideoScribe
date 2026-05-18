@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { type Summary, type SummaryKind } from '../api/client'
+import { type Summary, type SummaryKind, type VisionStatus } from '../api/client'
 import Markdown from './Markdown'
 import MindmapView from './MindmapView'
 
@@ -18,6 +18,7 @@ type Props = {
   kind: SummaryKind
   entry?: Summary
   framesCount: number
+  visionStatus?: VisionStatus
   dispatchError: { error: string; hint: string | null } | null
   onGenerate: () => void
 }
@@ -29,19 +30,31 @@ const KIND_HINTS: Record<SummaryKind, string> = {
   mindmap: '可视化思维导图，可拖拽 / 缩放查看',
 }
 
-export default function SummaryPanel({ kind, entry, framesCount, dispatchError, onGenerate }: Props) {
+export default function SummaryPanel({ kind, entry, framesCount, visionStatus, dispatchError, onGenerate }: Props) {
   const [copied, setCopied] = useState(false)
 
   const status = entry?.status
   const isPending = status === 'pending'
   const isDone = status === 'done' && !!entry?.markdown
   const isFailed = status === 'failed'
-  const visualHint = framesCount > 0 ? (
-    <div className="summary-visual-hint">
-      本次 AI 总结会融合 {framesCount} 条画面理解结果。
-      若画面理解是在摘要之后完成，请点击重新生成以融合画面信息。
-    </div>
-  ) : null
+  const visualHint = (() => {
+    if (framesCount > 0) {
+      return (
+        <div className="summary-visual-hint">
+          本次 AI 总结会融合 {framesCount} 条画面理解结果。
+          若画面理解是在摘要之后完成，请点击重新生成以融合画面信息。
+        </div>
+      )
+    }
+    if (visionStatus === 'pending' || visionStatus === 'running') {
+      return (
+        <div className="summary-visual-hint">
+          当前总结仅基于转写；画面理解完成后可重新生成视觉增强版。
+        </div>
+      )
+    }
+    return null
+  })()
 
   async function copy() {
     if (!entry?.markdown) return

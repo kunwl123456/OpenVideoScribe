@@ -26,6 +26,13 @@ export type Phase =
   | 'done'
   | 'failed'
 
+export type VisionStatus =
+  | 'disabled'
+  | 'pending'
+  | 'running'
+  | 'done'
+  | 'failed'
+
 export type FrameInsight = {
   index: number
   timestamp_sec: number
@@ -114,6 +121,11 @@ export type Job = {
   source?: SourceInfo
   transcript?: TranscriptResult
   media_path?: string
+  vision_status?: VisionStatus
+  vision_message?: string
+  vision_error?: string
+  vision_started_at?: string
+  vision_finished_at?: string
   frames_dir?: string
   frames?: FrameInsight[]
   logs?: LogLine[]
@@ -127,6 +139,7 @@ export type JobEvent = {
   message?: string
   done?: boolean
   error?: string
+  vision_status?: VisionStatus
 }
 
 // ApiError carries the HTTP status + any structured JSON body the

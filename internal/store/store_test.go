@@ -125,3 +125,42 @@ func TestRecoverStaleJobs_PreservesExistingError(t *testing.T) {
 		t.Errorf("error overwritten: %q", j.Error)
 	}
 }
+
+func TestRecoverStaleVision_MarksPendingOrRunningAsFailed(t *testing.T) {
+	dataDir := t.TempDir()
+	created := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	finished := created.Add(3 * time.Minute)
+
+	writeJobJSON(t, dataDir, &Job{ID: "vision-pending", Phase: PhaseDone, VisionStatus: VisionPending, CreatedAt: created, FinishedAt: &finished})
+	writeJobJSON(t, dataDir, &Job{ID: "vision-running", Phase: PhaseDone, VisionStatus: VisionRunning, CreatedAt: created, FinishedAt: &finished})
+	writeJobJSON(t, dataDir, &Job{ID: "vision-done", Phase: PhaseDone, VisionStatus: VisionDone, CreatedAt: created, FinishedAt: &finished})
+
+	s, err := New(dataDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, id := range []string{"vision-pending", "vision-running"} {
+		j, ok := s.Get(id)
+		if !ok {
+			t.Fatalf("%s: not in store", id)
+		}
+		if j.Phase != PhaseDone {
+			t.Errorf("%s: main phase = %s, want done", id, j.Phase)
+		}
+		if j.VisionStatus != VisionFailed {
+			t.Errorf("%s: vision status = %s, want failed", id, j.VisionStatus)
+		}
+		if j.VisionError == "" || j.VisionFinishedAt == nil {
+			t.Errorf("%s: missing recovered vision error/finish time: err=%q finished=%v", id, j.VisionError, j.VisionFinishedAt)
+		}
+		if len(j.Logs) == 0 || j.Logs[len(j.Logs)-1].Message != "服务重启，画面理解被中断" {
+			t.Errorf("%s: expected vision restart log, got %+v", id, j.Logs)
+		}
+	}
+
+	j, _ := s.Get("vision-done")
+	if j.VisionStatus != VisionDone || len(j.Logs) != 0 {
+		t.Errorf("vision-done mutated: status=%s logs=%d", j.VisionStatus, len(j.Logs))
+	}
+}

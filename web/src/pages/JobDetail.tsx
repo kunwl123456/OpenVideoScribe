@@ -10,6 +10,7 @@ import {
   Phase,
   Summary,
   SummaryKind,
+  VisionStatus,
   streamJob,
 } from '../api/client'
 import Brand from '../components/Brand'
@@ -73,6 +74,11 @@ function formatYuan(v: number): string {
   if (v < 0.01) return `¥${v.toFixed(4)}`
   if (v < 1) return `¥${v.toFixed(3)}`
   return `¥${v.toFixed(2)}`
+}
+
+function visionStatusOf(job: Job): VisionStatus | undefined {
+  if (job.vision_status) return job.vision_status
+  return (job.frames?.length ?? 0) > 0 ? 'done' : undefined
 }
 
 function frameCostText(frame: FrameInsight): string {
@@ -186,7 +192,9 @@ function PosterWithFallback({ jobId, mark }: { jobId: string; mark: string }) {
 
 function VisualInsightsPanel({ job, logs }: { job: Job; logs: LogLine[] }) {
   const frames = job.frames ?? []
-  const isAnalyzing = job.phase === 'analyzing'
+  const visionStatus = visionStatusOf(job)
+  const isAnalyzing = visionStatus === 'pending' || visionStatus === 'running'
+  const isFailed = visionStatus === 'failed'
   const latestLog = [...logs].reverse().find((l) => l.phase === 'analyzing' && l.message)
   const totals = summarizeFrames(frames)
 
@@ -194,14 +202,22 @@ function VisualInsightsPanel({ job, logs }: { job: Job; logs: LogLine[] }) {
     <div className="frames-panel">
       {isAnalyzing && (
         <div className="frames-status" role="status" aria-live="polite">
-          <div className="frames-status-title">正在进行画面理解…</div>
-          {(job.message || latestLog?.message) && (
+          <div className="frames-status-title">画面理解正在后台进行</div>
+          <div className="frames-status-msg">
+            不影响转写、导出和 AI 总结；完成后这里会自动出现关键帧结果。
+          </div>
+          {(job.vision_message || latestLog?.message) && (
             <div className="frames-status-msg">
-              {job.message ? `当前状态：${job.message}` : null}
-              {job.message && latestLog?.message ? ' · ' : null}
+              {job.vision_message ? `当前状态：${job.vision_message}` : null}
+              {job.vision_message && latestLog?.message ? ' · ' : null}
               {latestLog?.message ? `日志：${latestLog.message}` : null}
             </div>
           )}
+        </div>
+      )}
+      {isFailed && (
+        <div className="error">
+          画面理解失败，但转写任务已完成：{job.vision_error || job.vision_message || '请查看日志'}
         </div>
       )}
 
@@ -281,7 +297,9 @@ function VisualInsightsPanel({ job, logs }: { job: Job; logs: LogLine[] }) {
       ) : (
         !isAnalyzing && (
           <div className="empty">
-            本任务没有画面理解结果；可能是 VLM 未配置、视频没有可抽帧画面，或该任务在 VLM 功能上线前生成。
+            {isFailed
+              ? '本任务没有可展示的画面理解结果。'
+              : '本任务没有画面理解结果；可能是 VLM 未配置、视频没有可抽帧画面，或该任务在 VLM 功能上线前生成。'}
           </div>
         )
       )}
@@ -407,9 +425,14 @@ export default function JobDetail() {
     if (!job?.summaries) return false
     return Object.values(job.summaries).some((s) => s?.status === 'pending')
   }, [job?.summaries])
+  const hasVisionPending = useMemo(() => {
+    if (!job) return false
+    const status = visionStatusOf(job)
+    return status === 'pending' || status === 'running'
+  }, [job])
 
   useEffect(() => {
-    if (!hasPending) return
+    if (!hasPending && !hasVisionPending) return
     let cancelled = false
     const timer = setInterval(() => {
       api.getJob(id)
@@ -420,7 +443,7 @@ export default function JobDetail() {
       cancelled = true
       clearInterval(timer)
     }
-  }, [hasPending, id])
+  }, [hasPending, hasVisionPending, id])
 
   const combinedLogs = useMemo(() => {
     const persisted = job?.logs ?? []
@@ -591,6 +614,7 @@ export default function JobDetail() {
                 kind={tab}
                 entry={entry}
                 framesCount={j.frames?.length ?? 0}
+                visionStatus={visionStatusOf(j)}
                 dispatchError={dispatch ?? null}
                 onGenerate={() => generateSummary(tab as SummaryKind)}
               />

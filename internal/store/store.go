@@ -27,31 +27,48 @@ const (
 	PhaseDownloading  Phase = "downloading"
 	PhaseExtracting   Phase = "extracting"
 	PhaseTranscribing Phase = "transcribing"
-	// PhaseAnalyzing covers keyframe extraction + per-frame VLM
-	// description. It only fires when the visual stage is configured
-	// (cfg.VLM.Enabled()); otherwise jobs jump from PhaseTranscribing
-	// straight to PhaseDone.
+	// PhaseAnalyzing is kept for live VLM log/events and legacy records.
+	// New visual analysis runs in the background and reports lifecycle
+	// through Job.VisionStatus so PhaseDone remains stable.
 	PhaseAnalyzing Phase = "analyzing"
 	PhaseDone      Phase = "done"
 	PhaseFailed    Phase = "failed"
 )
 
+// VisionStatus tracks the optional visual-analysis enhancer separately
+// from the main transcription job. A job can be PhaseDone while vision
+// is still running in the background.
+type VisionStatus string
+
+const (
+	VisionDisabled VisionStatus = "disabled"
+	VisionPending  VisionStatus = "pending"
+	VisionRunning  VisionStatus = "running"
+	VisionDone     VisionStatus = "done"
+	VisionFailed   VisionStatus = "failed"
+)
+
 // Job is the canonical record persisted on disk.
 type Job struct {
-	ID            string                   `json:"id"`
-	URL           string                   `json:"url"`
-	Model         string                   `json:"model"`
-	Language      string                   `json:"language"`
-	Phase         Phase                    `json:"phase"`
-	Message       string                   `json:"message,omitempty"`
-	Error         string                   `json:"error,omitempty"`
-	CreatedAt     time.Time                `json:"created_at"`
-	StartedAt     *time.Time               `json:"started_at,omitempty"`
-	FinishedAt    *time.Time               `json:"finished_at,omitempty"`
-	Source        *ytdlp.Info              `json:"source,omitempty"`
-	Transcript    *asr.Result              `json:"transcript,omitempty"`
-	MediaPath     string                   `json:"media_path,omitempty"`
-	ThumbnailPath string                   `json:"thumbnail_path,omitempty"`
+	ID               string       `json:"id"`
+	URL              string       `json:"url"`
+	Model            string       `json:"model"`
+	Language         string       `json:"language"`
+	Phase            Phase        `json:"phase"`
+	Message          string       `json:"message,omitempty"`
+	Error            string       `json:"error,omitempty"`
+	CreatedAt        time.Time    `json:"created_at"`
+	StartedAt        *time.Time   `json:"started_at,omitempty"`
+	FinishedAt       *time.Time   `json:"finished_at,omitempty"`
+	Source           *ytdlp.Info  `json:"source,omitempty"`
+	Transcript       *asr.Result  `json:"transcript,omitempty"`
+	MediaPath        string       `json:"media_path,omitempty"`
+	ThumbnailPath    string       `json:"thumbnail_path,omitempty"`
+	VisionStatus     VisionStatus `json:"vision_status,omitempty"`
+	VisionMessage    string       `json:"vision_message,omitempty"`
+	VisionError      string       `json:"vision_error,omitempty"`
+	VisionStartedAt  *time.Time   `json:"vision_started_at,omitempty"`
+	VisionFinishedAt *time.Time   `json:"vision_finished_at,omitempty"`
 	// FramesDir is the per-job directory holding extracted keyframe
 	// JPGs + ffmpeg's metadata sidecar. Empty when the visual stage
 	// hasn't run for this job (vision disabled or skipped).
@@ -134,6 +151,9 @@ func New(dataDir string) (*Store, error) {
 	if n := s.recoverStaleJobsLocked(); n > 0 {
 		log.Printf("store: job recovery — marked %d zombie job(s) as failed (server restart while running)", n)
 	}
+	if n := s.recoverStaleVisionLocked(); n > 0 {
+		log.Printf("store: vision recovery — marked %d interrupted visual job(s) as failed", n)
+	}
 	if legacy, stale := s.recoverStaleSummariesLocked(); legacy+stale > 0 {
 		log.Printf("store: summary recovery — promoted %d legacy entr(ies) to done, marked %d stale pending as failed", legacy, stale)
 	}
@@ -179,6 +199,40 @@ func (s *Store) recoverStaleJobsLocked() int {
 		})
 		if err := s.persistLocked(j); err != nil {
 			log.Printf("store: persist stale job recovery for %s: %v", j.ID, err)
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// recoverStaleVisionLocked finalises visual-analysis goroutines that
+// were pending/running when the server stopped. The main job may already
+// be done; only the independent vision fields are touched.
+func (s *Store) recoverStaleVisionLocked() int {
+	now := time.Now().UTC()
+	var n int
+	for _, j := range s.jobs {
+		if j.VisionStatus != VisionPending && j.VisionStatus != VisionRunning {
+			continue
+		}
+		prev := j.VisionStatus
+		j.VisionStatus = VisionFailed
+		if j.VisionError == "" {
+			j.VisionError = fmt.Sprintf("interrupted (server restarted while vision %s)", prev)
+		}
+		j.VisionMessage = "画面理解被服务重启中断"
+		if j.VisionFinishedAt == nil {
+			t := now
+			j.VisionFinishedAt = &t
+		}
+		j.Logs = append(j.Logs, LogLine{
+			At:      now,
+			Phase:   PhaseAnalyzing,
+			Message: "服务重启，画面理解被中断",
+		})
+		if err := s.persistLocked(j); err != nil {
+			log.Printf("store: persist stale vision recovery for %s: %v", j.ID, err)
 			continue
 		}
 		n++

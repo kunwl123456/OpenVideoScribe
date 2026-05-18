@@ -41,8 +41,9 @@ type Manager struct {
 	store  *store.Store
 	vision *vision.Service // optional; nil disables the visual stage
 
-	queue chan string
-	wg    sync.WaitGroup
+	queue     chan string
+	visionSem chan struct{}
+	wg        sync.WaitGroup
 
 	mu      sync.Mutex
 	subs    map[string]map[chan Event]struct{} // jobID -> subscribers
@@ -51,11 +52,12 @@ type Manager struct {
 
 // Event is what the API streams via SSE.
 type Event struct {
-	JobID   string      `json:"job_id"`
-	Phase   store.Phase `json:"phase"`
-	Message string      `json:"message,omitempty"`
-	Done    bool        `json:"done,omitempty"`
-	Error   string      `json:"error,omitempty"`
+	JobID        string             `json:"job_id"`
+	Phase        store.Phase        `json:"phase"`
+	Message      string             `json:"message,omitempty"`
+	Done         bool               `json:"done,omitempty"`
+	Error        string             `json:"error,omitempty"`
+	VisionStatus store.VisionStatus `json:"vision_status,omitempty"`
 }
 
 // NewManager builds a Manager. visionSvc may be nil — when so (or when
@@ -63,12 +65,13 @@ type Event struct {
 // entirely and behaves identically to the pre-VLM build.
 func NewManager(cfg *config.Config, st *store.Store, visionSvc *vision.Service) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		store:   st,
-		vision:  visionSvc,
-		queue:   make(chan string, 32),
-		subs:    map[string]map[chan Event]struct{}{},
-		allSubs: map[chan Event]struct{}{},
+		cfg:       cfg,
+		store:     st,
+		vision:    visionSvc,
+		queue:     make(chan string, 32),
+		visionSem: make(chan struct{}, 1),
+		subs:      map[string]map[chan Event]struct{}{},
+		allSubs:   map[chan Event]struct{}{},
 	}
 }
 
@@ -113,6 +116,12 @@ func (m *Manager) Submit(url, model, language string) (*store.Job, error) {
 		CreatedAt: time.Now().UTC(),
 		Progress:  map[store.Phase]int{},
 	}
+	if m.visionEnabled() {
+		job.VisionStatus = store.VisionPending
+		job.VisionMessage = "等待转写完成后进行画面理解"
+	} else {
+		job.VisionStatus = store.VisionDisabled
+	}
 	if err := m.store.Create(job); err != nil {
 		return nil, err
 	}
@@ -156,7 +165,7 @@ func (m *Manager) run(parent context.Context, id string) {
 	// off, but the keyframe extractor needs a real video stream so we
 	// switch to "best video + best audio" the moment VLM is enabled.
 	format := ytdlp.FormatAudioOnly
-	if m.cfg.VLM.Enabled() {
+	if m.visionEnabled() {
 		format = ytdlp.FormatVideoPlusAudio
 	}
 	dlRes, err := ytdlp.Download(ctx, m.cfg, job.URL, m.cfg.DownloadsDir, format, func(line string) {
@@ -215,41 +224,47 @@ func (m *Manager) run(parent context.Context, id string) {
 		return
 	}
 
-	_, _ = m.store.Update(id, func(j *store.Job) {
-		j.Transcript = res
-	})
-
-	// 4. Visual analysis — best-effort. Any failure here is logged and
-	// the job still completes successfully; the visual stage is a
-	// summary enhancer, not a core deliverable.
-	m.maybeRunVision(ctx, id, dlRes.FilePath)
-
 	finished := time.Now().UTC()
 	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.Transcript = res
 		j.Phase = store.PhaseDone
 		j.FinishedAt = &finished
 		j.Message = "done"
+		if m.visionEnabled() {
+			j.VisionStatus = store.VisionPending
+			j.VisionMessage = "画面理解将在后台继续进行"
+		}
 	})
 	m.emit(id, Event{JobID: id, Phase: store.PhaseDone, Message: "done", Done: true})
+
+	// 4. Visual analysis — detached best-effort enhancer. It deliberately
+	// uses a background context so the main worker can return immediately
+	// and pick up the next queued transcription job.
+	if m.visionEnabled() {
+		go m.runVision(context.Background(), id, dlRes.FilePath)
+	}
 }
 
-// maybeRunVision extracts keyframes and asks the VLM provider to caption
-// each one. It is a no-op when vision is disabled. Errors at any sub-step
-// are logged + emitted as informational events but never propagate to
-// the job phase — the upstream contract is "vision is bonus content".
-func (m *Manager) maybeRunVision(ctx context.Context, id, videoPath string) {
-	if m.vision == nil || !m.vision.Enabled() {
+// runVision extracts keyframes and asks the VLM provider to caption each
+// one. It never mutates the main job Phase: visual analysis is a
+// background enhancer and failures are recorded only in vision fields.
+func (m *Manager) runVision(ctx context.Context, id, videoPath string) {
+	if !m.visionEnabled() {
 		return
 	}
-	if ctx.Err() != nil {
-		return
-	}
+	m.visionSem <- struct{}{}
+	defer func() { <-m.visionSem }()
 
+	started := time.Now().UTC()
 	_, _ = m.store.Update(id, func(j *store.Job) {
-		j.Phase = store.PhaseAnalyzing
-		j.Message = "extracting keyframes"
+		j.VisionStatus = store.VisionRunning
+		j.VisionMessage = "抽取关键帧"
+		j.VisionStartedAt = &started
+		j.VisionFinishedAt = nil
+		j.VisionError = ""
 	})
-	m.emit(id, Event{JobID: id, Phase: store.PhaseAnalyzing, Message: "抽取关键帧"})
+	m.appendLog(id, store.PhaseAnalyzing, "抽取关键帧")
+	m.emit(id, Event{JobID: id, Phase: store.PhaseAnalyzing, Message: "抽取关键帧", VisionStatus: store.VisionRunning})
 
 	framesDir := filepath.Join(m.cfg.FramesDir, id)
 	frames, err := media.ExtractKeyframes(ctx, m.cfg, videoPath, framesDir, media.FrameOptions{
@@ -260,33 +275,79 @@ func (m *Manager) maybeRunVision(ctx context.Context, id, videoPath string) {
 	if err != nil {
 		log.Printf("jobs %s: keyframes failed (non-fatal): %v", id, err)
 		m.appendLog(id, store.PhaseAnalyzing, "抽帧失败（不影响整体）："+err.Error())
+		m.failVision(id, err)
 		return
 	}
 	if len(frames) == 0 {
-		m.appendLog(id, store.PhaseAnalyzing, "未能从视频抽取关键帧（不影响整体）")
+		msg := "未能从视频抽取关键帧（不影响整体）"
+		m.appendLog(id, store.PhaseAnalyzing, msg)
+		m.finishVision(id, framesDir, nil, msg)
 		return
 	}
+	msg := fmt.Sprintf("抽到 %d 帧，开始画面理解", len(frames))
+	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.VisionMessage = msg
+	})
 	m.emit(id, Event{
-		JobID:   id,
-		Phase:   store.PhaseAnalyzing,
-		Message: fmt.Sprintf("抽到 %d 帧，开始画面理解", len(frames)),
+		JobID:        id,
+		Phase:        store.PhaseAnalyzing,
+		Message:      msg,
+		VisionStatus: store.VisionRunning,
 	})
 
 	insights, vErr := m.vision.Describe(ctx, frames, func(done, total int) {
+		msg := fmt.Sprintf("画面理解 %d/%d", done, total)
+		_, _ = m.store.Update(id, func(j *store.Job) {
+			j.VisionMessage = msg
+		})
 		m.emit(id, Event{
-			JobID:   id,
-			Phase:   store.PhaseAnalyzing,
-			Message: fmt.Sprintf("画面理解 %d/%d", done, total),
+			JobID:        id,
+			Phase:        store.PhaseAnalyzing,
+			Message:      msg,
+			VisionStatus: store.VisionRunning,
 		})
 	})
 	if vErr != nil {
 		log.Printf("jobs %s: vision failed (non-fatal): %v", id, vErr)
 		m.appendLog(id, store.PhaseAnalyzing, "画面理解失败（不影响整体）："+vErr.Error())
+		m.failVision(id, vErr)
 		return
 	}
+	m.finishVision(id, framesDir, insights, fmt.Sprintf("画面理解完成：%d 帧", len(insights)))
+}
+
+func (m *Manager) visionEnabled() bool {
+	return m.vision != nil && m.vision.Enabled()
+}
+
+func (m *Manager) finishVision(id, framesDir string, insights []vision.Insight, msg string) {
+	finished := time.Now().UTC()
 	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.VisionStatus = store.VisionDone
+		j.VisionMessage = msg
+		j.VisionFinishedAt = &finished
+		j.VisionError = ""
 		j.FramesDir = framesDir
 		j.Frames = insights
+	})
+	m.appendLog(id, store.PhaseAnalyzing, msg)
+	m.emit(id, Event{JobID: id, Phase: store.PhaseDone, Message: msg, VisionStatus: store.VisionDone})
+}
+
+func (m *Manager) failVision(id string, err error) {
+	finished := time.Now().UTC()
+	_, _ = m.store.Update(id, func(j *store.Job) {
+		j.VisionStatus = store.VisionFailed
+		j.VisionMessage = "画面理解失败（不影响转写）"
+		j.VisionError = err.Error()
+		j.VisionFinishedAt = &finished
+	})
+	m.emit(id, Event{
+		JobID:        id,
+		Phase:        store.PhaseDone,
+		Message:      "画面理解失败（不影响转写）",
+		Error:        err.Error(),
+		VisionStatus: store.VisionFailed,
 	})
 }
 
