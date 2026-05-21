@@ -78,11 +78,58 @@ type Job struct {
 	// Frames are the per-timestamp visual insights produced by the
 	// VLM stage. Sorted by TimestampSec ascending; empty when visual
 	// stage didn't run or yielded nothing.
-	Frames       []vision.Insight         `json:"frames,omitempty"`
-	Logs         []LogLine                `json:"logs,omitempty"`
-	Progress     map[Phase]int            `json:"progress,omitempty"` // 0..100 per phase
-	SimplifiedAt *time.Time               `json:"simplified_at,omitempty"`
-	Summaries    map[string]*SummaryEntry `json:"summaries,omitempty"` // key is summary.Kind string
+	Frames              []vision.Insight         `json:"frames,omitempty"`
+	Chapters            []Chapter                `json:"chapters,omitempty"`
+	ChaptersModel       string                   `json:"chapters_model,omitempty"`
+	ChaptersGeneratedAt *time.Time               `json:"chapters_generated_at,omitempty"`
+	QASessions          []QASession              `json:"qa_sessions,omitempty"`
+	Logs                []LogLine                `json:"logs,omitempty"`
+	Progress            map[Phase]int            `json:"progress,omitempty"` // 0..100 per phase
+	SimplifiedAt        *time.Time               `json:"simplified_at,omitempty"`
+	Summaries           map[string]*SummaryEntry `json:"summaries,omitempty"` // key is summary.Kind string
+}
+
+// Chapter is one chapterized section generated from transcript segments.
+// StartSec/EndSec are seconds from video start; Bullets keeps 3-5 key points.
+type Chapter struct {
+	Title     string         `json:"title"`
+	StartSec  float64        `json:"start_sec"`
+	EndSec    float64        `json:"end_sec"`
+	Bullets   []string       `json:"bullets"`
+	KeyQuotes []ChapterQuote `json:"key_quotes,omitempty"`
+}
+
+// ChapterQuote is one evidence sentence tied to a chapter time range.
+type ChapterQuote struct {
+	Text     string  `json:"text"`
+	StartSec float64 `json:"start_sec"`
+	EndSec   float64 `json:"end_sec"`
+}
+
+// QASession stores a multi-turn QA conversation within one job.
+type QASession struct {
+	ID        string      `json:"id"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	Messages  []QAMessage `json:"messages"`
+}
+
+// QAMessage is one turn in a QA session.
+type QAMessage struct {
+	Role      string       `json:"role"` // user | assistant
+	Content   string       `json:"content"`
+	At        time.Time    `json:"at"`
+	Citations []QACitation `json:"citations,omitempty"`
+}
+
+// QACitation links an answer sentence to transcript evidence.
+type QACitation struct {
+	JobID    string  `json:"job_id,omitempty"`
+	JobTitle string  `json:"job_title,omitempty"`
+	Text     string  `json:"text"`
+	Start    float64 `json:"start"`
+	End      float64 `json:"end"`
+	Score    float64 `json:"score,omitempty"`
 }
 
 // SummaryStatus tracks the lifecycle of one summary artefact. Persisted
@@ -151,7 +198,7 @@ func New(dataDir string) (*Store, error) {
 		log.Printf("store: migrated %d transcript(s) to simplified Chinese", n)
 	}
 	if n := s.recoverStaleJobsLocked(); n > 0 {
-		log.Printf("store: job recovery — marked %d zombie job(s) as failed (server restart while running)", n)
+		log.Printf("store: job recovery — requeued %d interrupted job(s) after restart", n)
 	}
 	if n := s.recoverStaleVisionLocked(); n > 0 {
 		log.Printf("store: vision recovery — marked %d interrupted visual job(s) as failed", n)
@@ -162,10 +209,9 @@ func New(dataDir string) (*Store, error) {
 	return s, nil
 }
 
-// recoverStaleJobsLocked finalises any job whose phase indicates it
-// was running when the server died. The previous goroutine is gone
-// and we don't support crash-resume, so the only honest thing to do
-// is mark them failed — otherwise the UI shows them spinning forever.
+// recoverStaleJobsLocked moves in-flight jobs back to queued after a
+// restart. The previous worker goroutine is gone, so we re-enter the
+// pipeline from the top rather than leaving stale "running" states.
 //
 // Mirrors recoverStaleSummariesLocked: every transition is persisted
 // to disk so memory and storage stay consistent across restarts, and
@@ -178,26 +224,17 @@ func (s *Store) recoverStaleJobsLocked() int {
 	now := time.Now().UTC()
 	var n int
 	for _, j := range s.jobs {
-		if j.Phase == PhaseDone || j.Phase == PhaseFailed {
+		if j.Phase == PhaseDone || j.Phase == PhaseFailed || j.Phase == PhaseQueued {
 			continue
 		}
-		prev := j.Phase
-		j.Phase = PhaseFailed
-		if j.Error == "" {
-			if prev == "" {
-				j.Error = "interrupted (server restarted)"
-			} else {
-				j.Error = fmt.Sprintf("interrupted (server restarted while %s)", prev)
-			}
-		}
-		if j.FinishedAt == nil {
-			t := now
-			j.FinishedAt = &t
-		}
+		j.Phase = PhaseQueued
+		j.Message = "服务重启后重新排队"
+		j.Error = ""
+		j.FinishedAt = nil
 		j.Logs = append(j.Logs, LogLine{
 			At:      now,
-			Phase:   PhaseFailed,
-			Message: "服务重启，任务被中断",
+			Phase:   PhaseQueued,
+			Message: "服务重启，任务已重新排队",
 		})
 		if err := s.persistLocked(j); err != nil {
 			log.Printf("store: persist stale job recovery for %s: %v", j.ID, err)
@@ -399,6 +436,70 @@ func (s *Store) SetSummaryStatus(id, kind string, status SummaryStatus, errMsg s
 		entry.Error = errMsg
 	})
 	return err
+}
+
+// SetChapters overwrites chapterized output for a job atomically.
+func (s *Store) SetChapters(id string, chapters []Chapter, model string, generatedAt time.Time) error {
+	_, err := s.Update(id, func(j *Job) {
+		if len(chapters) == 0 {
+			j.Chapters = nil
+		} else {
+			j.Chapters = append([]Chapter(nil), chapters...)
+		}
+		j.ChaptersModel = model
+		t := generatedAt.UTC()
+		j.ChaptersGeneratedAt = &t
+	})
+	return err
+}
+
+// AppendQAMessages appends turns into a per-job QA session. When the
+// session doesn't exist yet, it is created.
+func (s *Store) AppendQAMessages(id, sessionID string, msgs ...QAMessage) (*QASession, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id required")
+	}
+	updated, err := s.Update(id, func(j *Job) {
+		now := time.Now().UTC()
+		idx := -1
+		for i := range j.QASessions {
+			if j.QASessions[i].ID == sessionID {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			j.QASessions = append(j.QASessions, QASession{
+				ID:        sessionID,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Messages:  nil,
+			})
+			idx = len(j.QASessions) - 1
+		}
+		sess := &j.QASessions[idx]
+		for _, m := range msgs {
+			if m.Role == "" || m.Content == "" {
+				continue
+			}
+			if m.At.IsZero() {
+				m.At = now
+			}
+			sess.Messages = append(sess.Messages, m)
+		}
+		sess.UpdatedAt = now
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range updated.QASessions {
+		if updated.QASessions[i].ID == sessionID {
+			cp := updated.QASessions[i]
+			cp.Messages = append([]QAMessage(nil), cp.Messages...)
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("session %s not found after update", sessionID)
 }
 
 // recoverStaleSummariesLocked normalises summary entries at boot.

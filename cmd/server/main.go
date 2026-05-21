@@ -18,6 +18,8 @@ import (
 	"scribe-web/internal/jobs"
 	"scribe-web/internal/llm"
 	"scribe-web/internal/models"
+	"scribe-web/internal/notion"
+	"scribe-web/internal/qa"
 	"scribe-web/internal/store"
 	"scribe-web/internal/summary"
 	"scribe-web/internal/vision"
@@ -39,6 +41,8 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	log.Printf("scribe-web starting; data_dir=%s addr=%s", cfg.DataDir, cfg.Addr)
+	log.Printf("scribe-web: workers=%d job_retries=%d summary_retries=%d backoff=%s",
+		cfg.WorkerConcurrency, cfg.JobRetryCount, cfg.SummaryRetryCount, cfg.RetryBackoff)
 	logBin("ffmpeg", cfg.FFmpegBin)
 	logBin("yt-dlp", cfg.YtDlpBin)
 	logBin("whisper-cli", cfg.WhisperBin)
@@ -51,7 +55,10 @@ func main() {
 	mm := models.NewManager(cfg)
 	vs := vision.New(vlm.New(cfg.VLM), cfg.VLM)
 	jm := jobs.NewManager(cfg, st, vs)
-	sm := summary.New(llm.New(cfg.LLM), cfg.LLM)
+	llmProv := llm.New(cfg.LLM)
+	sm := summary.New(llmProv, cfg.LLM)
+	qaSvc := qa.New(llmProv, cfg.LLM)
+	notionSvc := notion.New(cfg.Notion)
 	if cfg.LLM != nil && cfg.LLM.Enabled() {
 		red := cfg.LLM.Redacted()
 		log.Printf("scribe-web: llm enabled (base_url=%s model=%s key=%s)", red.BaseURL, red.Model, red.APIKey)
@@ -65,6 +72,13 @@ func main() {
 	} else {
 		log.Printf("scribe-web: vlm disabled (no api_key/model configured) — visual analysis stage will be skipped")
 	}
+	if cfg.Notion != nil && cfg.Notion.Enabled() {
+		red := cfg.Notion.Redacted()
+		log.Printf("scribe-web: notion enabled (base_url=%s version=%s token=%s database_id=%s page_id=%s)",
+			red.BaseURL, red.NotionVersion, red.Token, red.DatabaseID, red.PageID)
+	} else {
+		log.Printf("scribe-web: notion disabled (no token or parent configured) — /export/notion will return 503")
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -76,7 +90,7 @@ func main() {
 		log.Printf("scribe-web: no embedded UI found (web_dist/index.html missing); running API-only")
 	}
 
-	handler := httpapi.New(cfg, st, jm, mm, sm, uiFS)
+	handler := httpapi.New(cfg, st, jm, mm, sm, qaSvc, notionSvc, uiFS)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

@@ -5,6 +5,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,8 @@ import (
 	"scribe-web/internal/jobs"
 	"scribe-web/internal/llm"
 	"scribe-web/internal/models"
+	"scribe-web/internal/notion"
+	"scribe-web/internal/qa"
 	"scribe-web/internal/store"
 	"scribe-web/internal/summary"
 )
@@ -34,16 +38,19 @@ type Server struct {
 	jobs    *jobs.Manager
 	models  *models.Manager
 	summary *summary.Service
+	qa      *qa.Service
+	notion  *notion.Service
 	static  fs.FS // optional embedded UI; nil means dev-mode (no UI served)
 }
 
-func New(cfg *config.Config, st *store.Store, jm *jobs.Manager, mm *models.Manager, sm *summary.Service, static fs.FS) http.Handler {
-	s := &Server{cfg: cfg, store: st, jobs: jm, models: mm, summary: sm, static: static}
+func New(cfg *config.Config, st *store.Store, jm *jobs.Manager, mm *models.Manager, sm *summary.Service, qaSvc *qa.Service, notionSvc *notion.Service, static fs.FS) http.Handler {
+	s := &Server{cfg: cfg, store: st, jobs: jm, models: mm, summary: sm, qa: qaSvc, notion: notionSvc, static: static}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/models", s.handleModels)
 	mux.HandleFunc("/api/models/", s.handleModelDownload) // POST /api/models/{key}/download
+	mux.HandleFunc("/api/qa", s.handleGlobalQA)           // POST global KB QA
 	mux.HandleFunc("/api/jobs", s.handleJobs)             // GET list, POST create
 	mux.HandleFunc("/api/jobs/", s.handleJobByID)         // GET / DELETE / events / export / summarize
 
@@ -89,13 +96,32 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	} else {
 		vlmInfo["hint"] = "可选：复制 scribe-vlm.example.json 为 scribe-vlm.json 启用画面理解"
 	}
+	notionInfo := map[string]any{"enabled": false}
+	if s.cfg.Notion != nil && s.cfg.Notion.Enabled() {
+		red := s.cfg.Notion.Redacted()
+		notionInfo = map[string]any{
+			"enabled":        true,
+			"token":          red.Token,
+			"page_id":        red.PageID,
+			"database_id":    red.DatabaseID,
+			"notion_version": red.NotionVersion,
+		}
+	} else {
+		notionInfo["hint"] = "可选：复制 scribe-notion.example.json 为 scribe-notion.json，填写 token 与 page_id 或 database_id"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"time":     time.Now().UTC(),
 		"data_dir": s.cfg.DataDir,
 		"binaries": s.binaryStatus(),
-		"llm":      llmInfo,
-		"vlm":      vlmInfo,
+		"tasks": map[string]any{
+			"worker_concurrency":  s.cfg.WorkerConcurrency,
+			"job_retry_count":     s.cfg.JobRetryCount,
+			"summary_retry_count": s.cfg.SummaryRetryCount,
+		},
+		"llm":    llmInfo,
+		"vlm":    vlmInfo,
+		"notion": notionInfo,
 	})
 }
 
@@ -192,10 +218,16 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, job)
 	case len(parts) == 2 && parts[1] == "events":
 		s.streamEvents(w, r, id)
+	case len(parts) == 3 && parts[1] == "export" && parts[2] == "notion":
+		s.handleExportNotion(w, r, job)
 	case len(parts) == 2 && parts[1] == "export":
 		s.exportTranscript(w, r, job)
 	case len(parts) == 2 && parts[1] == "summarize":
 		s.handleSummarize(w, r, job)
+	case len(parts) == 2 && parts[1] == "qa":
+		s.handleQA(w, r, job)
+	case len(parts) == 2 && parts[1] == "chapters":
+		s.handleChapters(w, r, job)
 	case len(parts) == 2 && parts[1] == "thumbnail":
 		s.handleThumbnail(w, r, job)
 	case len(parts) == 3 && parts[1] == "frames":
@@ -319,10 +351,7 @@ func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request, job *st
 		return
 	}
 	if s.cfg.LLM == nil || !s.cfg.LLM.Enabled() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "LLM 未配置",
-			"hint":  "复制 scribe-llm.example.json 为 scribe-llm.json，填入 api_key 和 model；或设置 SCRIBE_LLM_API_KEY / SCRIBE_LLM_MODEL 环境变量",
-		})
+		writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
 		return
 	}
 	if job.Transcript == nil {
@@ -380,6 +409,248 @@ func (s *Server) handleSummarize(w http.ResponseWriter, r *http.Request, job *st
 	writeJSON(w, http.StatusAccepted, pending)
 }
 
+func (s *Server) handleQA(w http.ResponseWriter, r *http.Request, job *store.Job) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.LLM == nil || !s.cfg.LLM.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		return
+	}
+	if s.qa == nil {
+		writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		return
+	}
+	if job.Transcript == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "transcript 尚未生成，无法问答",
+		})
+		return
+	}
+	if len(job.Transcript.Segments) == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "transcript 无可检索分段，无法问答",
+		})
+		return
+	}
+	var body struct {
+		Question     string `json:"question"`
+		TopK         int    `json:"top_k,omitempty"`
+		SessionID    string `json:"session_id,omitempty"`
+		HistoryLimit int    `json:"history_limit,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Question) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question 不能为空"})
+		return
+	}
+	if body.HistoryLimit <= 0 {
+		body.HistoryLimit = 8
+	}
+	if body.HistoryLimit > 30 {
+		body.HistoryLimit = 30
+	}
+	sessionID := strings.TrimSpace(body.SessionID)
+	if sessionID == "" {
+		sessionID = newSessionID()
+	}
+	var history []qa.ChatMessage
+	for _, sess := range job.QASessions {
+		if sess.ID != sessionID {
+			continue
+		}
+		start := 0
+		if len(sess.Messages) > body.HistoryLimit {
+			start = len(sess.Messages) - body.HistoryLimit
+		}
+		for _, m := range sess.Messages[start:] {
+			role := strings.TrimSpace(m.Role)
+			content := strings.TrimSpace(m.Content)
+			if content == "" {
+				continue
+			}
+			history = append(history, qa.ChatMessage{Role: role, Content: content})
+		}
+		break
+	}
+
+	timeout := 60 * time.Second
+	if s.cfg.LLM != nil && s.cfg.LLM.Timeout > 0 {
+		timeout = s.cfg.LLM.Timeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	res, err := s.qa.AnswerWithContext(ctx, job.Transcript, body.Question, history, body.TopK)
+	if err != nil {
+		switch {
+		case errors.Is(err, llm.ErrNoAPIKey):
+			writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		case errors.Is(err, llm.ErrRateLimited), errors.Is(err, llm.ErrUpstream), errors.Is(err, llm.ErrTimeout):
+			code, body := mapSummaryError(err)
+			writeJSON(w, code, body)
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	assistantCitations := make([]store.QACitation, 0, len(res.Citations))
+	for _, c := range res.Citations {
+		assistantCitations = append(assistantCitations, store.QACitation{
+			JobID:    c.JobID,
+			JobTitle: c.JobTitle,
+			Text:     c.Text,
+			Start:    c.Start,
+			End:      c.End,
+			Score:    c.Score,
+		})
+	}
+	sess, err := s.store.AppendQAMessages(job.ID, sessionID,
+		store.QAMessage{
+			Role:    "user",
+			Content: strings.TrimSpace(body.Question),
+			At:      time.Now().UTC(),
+		},
+		store.QAMessage{
+			Role:      "assistant",
+			Content:   strings.TrimSpace(res.Answer),
+			At:        time.Now().UTC(),
+			Citations: assistantCitations,
+		},
+	)
+	if err != nil {
+		http.Error(w, "persist qa session: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_id":     sessionID,
+		"answer":         res.Answer,
+		"citations":      res.Citations,
+		"model":          res.Model,
+		"evidence_found": res.EvidenceFound,
+		"messages":       sess.Messages,
+	})
+}
+
+func (s *Server) handleGlobalQA(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.LLM == nil || !s.cfg.LLM.Enabled() || s.qa == nil {
+		writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		return
+	}
+	var body struct {
+		Question string `json:"question"`
+		TopK     int    `json:"top_k,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Question) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question 不能为空"})
+		return
+	}
+	allJobs := s.store.List()
+	docs := make([]qa.GlobalDocument, 0, len(allJobs))
+	for _, j := range allJobs {
+		if j == nil || j.Transcript == nil || len(j.Transcript.Segments) == 0 {
+			continue
+		}
+		title := j.URL
+		if j.Source != nil && strings.TrimSpace(j.Source.Title) != "" {
+			title = j.Source.Title
+		}
+		docs = append(docs, qa.GlobalDocument{
+			JobID:    j.ID,
+			JobTitle: title,
+			Segments: j.Transcript.Segments,
+		})
+	}
+	if len(docs) == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "暂无可检索的视频转写数据"})
+		return
+	}
+	timeout := 60 * time.Second
+	if s.cfg.LLM != nil && s.cfg.LLM.Timeout > 0 {
+		timeout = s.cfg.LLM.Timeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	res, err := s.qa.AnswerAcrossJobs(ctx, body.Question, docs, body.TopK)
+	if err != nil {
+		switch {
+		case errors.Is(err, llm.ErrNoAPIKey):
+			writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		case errors.Is(err, llm.ErrRateLimited), errors.Is(err, llm.ErrUpstream), errors.Is(err, llm.ErrTimeout):
+			code, body := mapSummaryError(err)
+			writeJSON(w, code, body)
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"answer":         res.Answer,
+		"citations":      res.Citations,
+		"model":          res.Model,
+		"evidence_found": res.EvidenceFound,
+	})
+}
+
+func (s *Server) handleChapters(w http.ResponseWriter, r *http.Request, job *store.Job) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.LLM == nil || !s.cfg.LLM.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		return
+	}
+	if job.Transcript == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "transcript 尚未生成，无法生成章节",
+		})
+		return
+	}
+	if len(job.Transcript.Segments) == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "transcript 无可用分段，无法生成章节",
+		})
+		return
+	}
+
+	timeout := 60 * time.Second
+	if s.cfg.LLM != nil && s.cfg.LLM.Timeout > 0 {
+		timeout = s.cfg.LLM.Timeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	res, err := s.qa.GenerateChapters(ctx, job.Transcript, 12)
+	if err != nil {
+		switch {
+		case errors.Is(err, llm.ErrNoAPIKey):
+			writeJSON(w, http.StatusServiceUnavailable, llmUnconfiguredBody())
+		case errors.Is(err, llm.ErrRateLimited), errors.Is(err, llm.ErrUpstream), errors.Is(err, llm.ErrTimeout):
+			code, body := mapSummaryError(err)
+			writeJSON(w, code, body)
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	if err := s.store.SetChapters(job.ID, res.Chapters, res.Model, res.GeneratedAt); err != nil {
+		http.Error(w, "persist chapters: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // runSummary executes a summary generation on a detached background
 // context (we deliberately don't bind to the HTTP request context —
 // the caller is long gone by the time we return) and persists the
@@ -392,13 +663,40 @@ func (s *Server) runSummary(jobID, kindStr string, transcript *asr.Result, meta 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	kind, err := summary.ParseKind(kindStr)
-	if err != nil {
-		_ = s.store.SetSummaryStatus(jobID, kindStr, store.SummaryFailed, err.Error())
+	kind, parseErr := summary.ParseKind(kindStr)
+	if parseErr != nil {
+		_ = s.store.SetSummaryStatus(jobID, kindStr, store.SummaryFailed, parseErr.Error())
 		return
 	}
 
-	res, err := s.summary.Generate(ctx, transcript, kind, meta)
+	maxRetry := 0
+	if s.cfg != nil && s.cfg.SummaryRetryCount > 0 {
+		maxRetry = s.cfg.SummaryRetryCount
+	}
+	backoff := 1200 * time.Millisecond
+	if s.cfg != nil && s.cfg.RetryBackoff > 0 {
+		backoff = s.cfg.RetryBackoff
+	}
+	var res *summary.Result
+	var err error
+	for attempt := 0; attempt <= maxRetry; attempt++ {
+		res, err = s.summary.Generate(ctx, transcript, kind, meta)
+		if err == nil {
+			break
+		}
+		retryable := errors.Is(err, llm.ErrTimeout) || errors.Is(err, llm.ErrRateLimited) || errors.Is(err, llm.ErrUpstream)
+		if !retryable || attempt == maxRetry {
+			break
+		}
+		wait := backoff * time.Duration(1<<attempt)
+		log.Printf("summary: %s/%s retry %d/%d after error: %v", jobID, kindStr, attempt+1, maxRetry, err)
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			attempt = maxRetry
+		case <-time.After(wait):
+		}
+	}
 	if err != nil {
 		_, body := mapSummaryError(err)
 		msg := body["error"]
@@ -440,6 +738,28 @@ func mapSummaryError(err error) (int, map[string]string) {
 		return http.StatusBadGateway, map[string]string{"error": "LLM 上游错误", "detail": err.Error()}
 	}
 	return http.StatusInternalServerError, map[string]string{"error": err.Error()}
+}
+
+func llmUnconfiguredBody() map[string]string {
+	return map[string]string{
+		"error": "LLM 未配置",
+		"hint":  "复制 scribe-llm.example.json 为 scribe-llm.json，填入 api_key 和 model；或设置 SCRIBE_LLM_API_KEY / SCRIBE_LLM_MODEL 环境变量",
+	}
+}
+
+func notionUnconfiguredBody() map[string]string {
+	return map[string]string{
+		"error": "Notion 未配置",
+		"hint":  "复制 scribe-notion.example.json 为 scribe-notion.json，填入 token 与 page_id 或 database_id；或设置 SCRIBE_NOTION_TOKEN 等环境变量",
+	}
+}
+
+func newSessionID() string {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("sess-%d", time.Now().UnixNano())
+	}
+	return "sess-" + time.Now().UTC().Format("20060102-150405-") + hex.EncodeToString(buf)
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, id string) {
@@ -492,15 +812,52 @@ func (s *Server) exportTranscript(w http.ResponseWriter, r *http.Request, job *s
 	if format == "" {
 		format = "srt"
 	}
-	body, ct, err := formatExport(job.Transcript, format)
+	body, ct, err := formatExport(job, format)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	filename := fmt.Sprintf("%s.%s", job.ID, format)
+	ext := format
+	if format == "md_bundle" || format == "obsidian" || format == "notion_import" || format == "xmind_outline" {
+		ext = "md"
+	}
+	if format == "xmind_json" {
+		ext = "json"
+	}
+	filename := fmt.Sprintf("%s.%s", job.ID, ext)
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	_, _ = w.Write(body)
+}
+
+func (s *Server) handleExportNotion(w http.ResponseWriter, r *http.Request, job *store.Job) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.notion == nil || !s.notion.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, notionUnconfiguredBody())
+		return
+	}
+	if job.Transcript == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "transcript 尚未生成，无法导出到 Notion",
+		})
+		return
+	}
+	res, err := s.notion.ExportJob(r.Context(), job)
+	if err != nil {
+		if errors.Is(err, notion.ErrNotConfigured) {
+			writeJSON(w, http.StatusServiceUnavailable, notionUnconfiguredBody())
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error":  "Notion 导出失败",
+			"detail": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // ---------------- static UI ----------------

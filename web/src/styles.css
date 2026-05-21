@@ -673,7 +673,7 @@ input, select, textarea {
     linear-gradient(180deg, #ffffff 0%, #fbfaff 100%);
   border: 1px solid var(--border);
   border-radius: var(--r-xl);
-  padding: 28px 32px;
+  padding: 30px 34px;
   margin-bottom: 24px;
   box-shadow: var(--shadow-lg);
   overflow: hidden;
@@ -759,9 +759,9 @@ input, select, textarea {
 }
 
 .video-card-meta {
-  display: flex;
-  gap: 24px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
   margin-top: 18px;
   padding-top: 18px;
   border-top: 1px dashed var(--border);
@@ -770,14 +770,19 @@ input, select, textarea {
 .video-card-meta-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+  min-height: 62px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 12px -10px rgba(83, 56, 200, 0.26);
 }
 
 .video-card-meta-item .k {
   font-size: 11px;
   color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   font-weight: 600;
 }
 
@@ -790,7 +795,8 @@ input, select, textarea {
 /* ----------------- tabs (pill style) ----------------- */
 
 .tabs {
-  display: inline-flex;
+  display: flex;
+  width: 100%;
   gap: 4px;
   padding: 5px;
   margin: 20px 0 16px 0;
@@ -807,6 +813,9 @@ input, select, textarea {
   border-radius: var(--r-pill);
   font-size: 13.5px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  writing-mode: horizontal-tb;
   transition: color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 
@@ -845,8 +854,10 @@ input, select, textarea {
 .tabs.scroll-x {
   max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
   flex-wrap: nowrap;
   scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
 .tabs.scroll-x::-webkit-scrollbar { height: 4px; }
 .tabs.scroll-x::-webkit-scrollbar-thumb { background: rgba(109, 76, 242, 0.2); border-radius: 3px; }
@@ -1053,6 +1064,13 @@ input, select, textarea {
   border-bottom: 1px dashed var(--border);
 }
 
+.segment.is-active {
+  background: var(--accent-soft);
+  border-radius: var(--r-md);
+  padding: 12px 10px;
+  margin: 4px 0;
+}
+
 .segment:last-child { border-bottom: 0; }
 
 .segment-time {
@@ -1075,6 +1093,139 @@ input, select, textarea {
   font-size: 14.5px;
   line-height: 1.7;
   color: var(--text);
+}
+
+.qa-panel,
+.chapters-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 22px 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.qa-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qa-form textarea {
+  width: 100%;
+  min-height: 86px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.qa-answer {
+  margin-top: 14px;
+}
+
+.qa-turn {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: #fff;
+}
+
+.qa-answer-title,
+.qa-citations-title {
+  font-size: 13px;
+  color: var(--text-soft);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.qa-answer-text {
+  white-space: pre-wrap;
+  line-height: 1.75;
+  color: var(--text);
+}
+
+.qa-citations {
+  margin-top: 14px;
+}
+
+.qa-citation {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: var(--panel-soft);
+}
+
+.qa-citation-text {
+  margin-top: 8px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.qa-video-link {
+  margin-left: 10px;
+  font-size: 12.5px;
+  color: var(--accent);
+}
+
+.time-link {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 0;
+  cursor: pointer;
+}
+
+.time-link:hover {
+  text-decoration: underline;
+}
+
+.chapters-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chapters-list {
+  display: grid;
+  gap: 10px;
+}
+
+.chapter-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: linear-gradient(180deg, #ffffff 0%, #faf9ff 100%);
+  padding: 14px 16px;
+  box-shadow: 0 6px 16px -12px rgba(83, 56, 200, 0.28);
+}
+
+.chapter-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chapter-head h3 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.chapter-card ul {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.chapter-quotes {
+  margin-top: 10px;
 }
 
 .frames-panel {
@@ -1290,6 +1441,54 @@ input, select, textarea {
   margin: 8px 0 0 0;
 }
 
+.detail-actions {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.export-actions {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.action-group .btn.secondary {
+  min-width: 124px;
+  height: 36px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.danger-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: stretch;
+}
+
+.notion-export-feedback {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
 .empty {
   text-align: center;
   color: var(--muted);
@@ -1436,6 +1635,31 @@ input, select, textarea {
   .btn { width: 100%; }
   .video-card { padding: 22px 20px; }
   .video-card-poster { width: 64px; height: 64px; font-size: 24px; }
+  .video-card-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .detail-actions { gap: 10px; }
+  .export-actions { width: 100%; }
+  .action-group { padding: 8px; }
+  .action-group .btn.secondary {
+    min-width: 0;
+    flex: 1 1 calc(50% - 8px);
+    width: auto;
+  }
+  .danger-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+  .tabs {
+    border-radius: var(--r-lg);
+    padding: 6px;
+  }
+  .tab {
+    padding: 7px 12px;
+    font-size: 13px;
+  }
+  .qa-panel,
+  .chapters-panel {
+    padding: 18px 16px;
+  }
   .frames-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .frame-card { grid-template-columns: 1fr; }
 }

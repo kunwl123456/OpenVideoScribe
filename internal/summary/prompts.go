@@ -138,6 +138,130 @@ const mindmapPrompt = `请基于下面这段视频转写生成一份思维导图
 
 直接输出 Markdown，不要 ` + "```" + ` 代码围栏，也不要额外解释。`
 
+const studyNotesPrompt = `请把视频内容整理成“学习笔记”Markdown。
+
+结构要求：
+- ` + "`## 核心概念`" + `：列出 3-8 个概念并解释；
+- ` + "`## 关键结论`" + `：列出 3-6 条结论；
+- ` + "`## 易错点与澄清`" + `：列出 2-5 条；
+- ` + "`## 复习清单`" + `：给出可执行的 5 条复习动作。
+
+视频标题：{{.Title}}
+{{- if .Uploader}}
+作者：{{.Uploader}}
+{{- end}}
+
+转写正文：
+"""
+{{.FullText}}
+"""
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
+
+直接输出 Markdown，不要额外解释。`
+
+const wechatArticlePrompt = `请把视频内容改写成“公众号文章”草稿（简体中文），用 Markdown 输出。
+
+要求：
+- 文章标题 + 导语 + 正文分节 + 结尾互动；
+- 行文自然，适合公众号阅读；
+- 保留原文关键事实，不得编造。
+
+视频标题：{{.Title}}
+{{- if .Uploader}}
+作者：{{.Uploader}}
+{{- end}}
+
+转写正文：
+"""
+{{.FullText}}
+"""
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
+
+直接输出文章 Markdown。`
+
+const courseHandoutPrompt = `请基于视频转写生成“课程讲义”Markdown。
+
+结构要求：
+- ` + "`## 课程目标`" + `
+- ` + "`## 知识结构`" + `（分点）
+- ` + "`## 讲解要点`" + `（按章节）
+- ` + "`## 课堂练习`" + `（至少 3 题）
+- ` + "`## 课后作业`" + `
+
+视频标题：{{.Title}}
+{{- if .Uploader}}
+作者：{{.Uploader}}
+{{- end}}
+
+转写正文：
+"""
+{{.FullText}}
+"""
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
+
+直接输出讲义 Markdown。`
+
+const shortVideoScriptPrompt = `请将视频要点改写为“短视频脚本”Markdown，适合 60-180 秒内容。
+
+结构要求：
+- ` + "`## 选题标题`" + `
+- ` + "`## 口播脚本`" + `（分镜头/段落，标注时长）
+- ` + "`## 屏幕字幕建议`" + `
+- ` + "`## 结尾互动话术`" + `
+
+视频标题：{{.Title}}
+{{- if .Uploader}}
+作者：{{.Uploader}}
+{{- end}}
+
+转写正文：
+"""
+{{.FullText}}
+"""
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
+
+直接输出脚本 Markdown。`
+
+const quoteCardsPrompt = `请从视频中提炼“金句卡片”Markdown。
+
+要求：
+- 输出 8-15 条金句；
+- 每条包含：` + "`金句`" + ` + ` + "`解读`" + ` + ` + "`适用场景`" + `；
+- 尽量保留原文表达，不要编造未出现观点。
+
+视频标题：{{.Title}}
+{{- if .Uploader}}
+作者：{{.Uploader}}
+{{- end}}
+
+转写正文：
+"""
+{{.FullText}}
+"""
+{{- if .VisualInsights}}
+
+画面信息（按时间戳，由视觉模型生成，可能与转写互补）：
+{{.VisualInsights}}
+{{- end}}
+
+直接输出 Markdown。`
+
 // promptForKind returns the template body for the given Kind, with
 // systemPrompt always paired alongside.
 func promptForKind(k Kind) string {
@@ -150,6 +274,16 @@ func promptForKind(k Kind) string {
 		return outlinePrompt
 	case KindMindmap:
 		return mindmapPrompt
+	case KindStudyNotes:
+		return studyNotesPrompt
+	case KindWechatArticle:
+		return wechatArticlePrompt
+	case KindCourseHandout:
+		return courseHandoutPrompt
+	case KindShortVideoScript:
+		return shortVideoScriptPrompt
+	case KindQuoteCards:
+		return quoteCardsPrompt
 	}
 	return briefPrompt
 }

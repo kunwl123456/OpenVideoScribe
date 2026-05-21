@@ -28,6 +28,11 @@ const KIND_HINTS: Record<SummaryKind, string> = {
   detailed: '300 字左右的详细摘要，覆盖主线、论据与结论',
   outline: '层级化的 Markdown 大纲，方便快速浏览',
   mindmap: '可视化思维导图，可拖拽 / 缩放查看',
+  study_notes: '学习笔记：概念、结论、易错点与复习清单',
+  wechat_article: '公众号文案：导语、分节正文与结尾互动',
+  course_handout: '课程讲义：目标、要点、练习与作业',
+  short_video_script: '短视频脚本：口播、字幕与互动话术',
+  quote_cards: '金句卡片：金句 + 解读 + 适用场景',
 }
 
 export default function SummaryPanel({ kind, entry, framesCount, visionStatus, dispatchError, onGenerate }: Props) {
@@ -202,5 +207,10 @@ function kindLabel(k: SummaryKind): string {
     case 'detailed': return '详细摘要'
     case 'outline': return '大纲'
     case 'mindmap': return '思维导图'
+    case 'study_notes': return '学习笔记'
+    case 'wechat_article': return '公众号文案'
+    case 'course_handout': return '课程讲义'
+    case 'short_video_script': return '短视频脚本'
+    case 'quote_cards': return '金句卡片'
   }
 }

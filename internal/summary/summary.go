@@ -1,5 +1,5 @@
-// Package summary turns a finished transcript into one of four
-// structured artefacts (brief / detailed / outline / mindmap) by
+// Package summary turns a finished transcript into structured artefacts
+// (brief / detailed / outline / mindmap / study_notes / ...) by
 // prompting an OpenAI-compatible LLM provider. Stateless; persistence
 // is the caller's job (see internal/store SetSummary).
 package summary
@@ -22,15 +22,30 @@ import (
 type Kind string
 
 const (
-	KindBrief    Kind = "brief"
-	KindDetailed Kind = "detailed"
-	KindOutline  Kind = "outline"
-	KindMindmap  Kind = "mindmap"
+	KindBrief            Kind = "brief"
+	KindDetailed         Kind = "detailed"
+	KindOutline          Kind = "outline"
+	KindMindmap          Kind = "mindmap"
+	KindStudyNotes       Kind = "study_notes"
+	KindWechatArticle    Kind = "wechat_article"
+	KindCourseHandout    Kind = "course_handout"
+	KindShortVideoScript Kind = "short_video_script"
+	KindQuoteCards       Kind = "quote_cards"
 )
 
 // AllKinds is the canonical iteration order — used by tests and any
 // future "generate everything at once" endpoint.
-var AllKinds = []Kind{KindBrief, KindDetailed, KindOutline, KindMindmap}
+var AllKinds = []Kind{
+	KindBrief,
+	KindDetailed,
+	KindOutline,
+	KindMindmap,
+	KindStudyNotes,
+	KindWechatArticle,
+	KindCourseHandout,
+	KindShortVideoScript,
+	KindQuoteCards,
+}
 
 // ParseKind validates the wire string. Returns an error for unknown
 // values so the HTTP layer can answer 400 with a usable message.
@@ -41,7 +56,7 @@ func ParseKind(s string) (Kind, error) {
 			return k, nil
 		}
 	}
-	return "", fmt.Errorf("unknown summary kind %q (want brief|detailed|outline|mindmap)", s)
+	return "", fmt.Errorf("unknown summary kind %q", s)
 }
 
 // Result is what Generate returns and what the API persists.

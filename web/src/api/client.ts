@@ -92,7 +92,16 @@ export type LogLine = {
   message: string
 }
 
-export type SummaryKind = 'brief' | 'detailed' | 'outline' | 'mindmap'
+export type SummaryKind =
+  | 'brief'
+  | 'detailed'
+  | 'outline'
+  | 'mindmap'
+  | 'study_notes'
+  | 'wechat_article'
+  | 'course_handout'
+  | 'short_video_script'
+  | 'quote_cards'
 
 export type SummaryStatus = 'pending' | 'done' | 'failed'
 
@@ -115,6 +124,57 @@ export type SummaryError = {
   error: string
   hint?: string
   detail?: string
+}
+
+export type QACitation = {
+  job_id?: string
+  job_title?: string
+  text: string
+  start: number
+  end: number
+  score?: number
+}
+
+export type QAResponse = {
+  session_id?: string
+  answer: string
+  citations: QACitation[]
+  model?: string
+  evidence_found?: boolean
+  messages?: QAMessage[]
+}
+
+export type QAMessage = {
+  role: 'user' | 'assistant'
+  content: string
+  at: string
+  citations?: QACitation[]
+}
+
+export type Chapter = {
+  title: string
+  start_sec: number
+  end_sec: number
+  bullets: string[]
+  key_quotes?: ChapterQuote[]
+}
+
+export type ChapterQuote = {
+  text: string
+  start_sec: number
+  end_sec: number
+}
+
+export type ChaptersResponse = {
+  chapters: Chapter[]
+  model?: string
+  generated_at: string
+}
+
+export type NotionExportResponse = {
+  page_id: string
+  page_url: string
+  exported_at: string
 }
 
 export type Job = {
@@ -143,6 +203,17 @@ export type Job = {
   logs?: LogLine[]
   progress?: Partial<Record<Phase, number>>
   summaries?: Partial<Record<SummaryKind, Summary>>
+  chapters?: Chapter[]
+  chapters_model?: string
+  chapters_generated_at?: string
+  qa_sessions?: QASession[]
+}
+
+export type QASession = {
+  id: string
+  created_at: string
+  updated_at: string
+  messages: QAMessage[]
 }
 
 export type JobEvent = {
@@ -237,7 +308,28 @@ export const api = {
       : (text || `HTTP ${res.status}`)
     throw new ApiError(res.status, message, body)
   },
-  exportURL: (id: string, format: 'srt' | 'md' | 'txt') =>
+  qa: (id: string, payload: { question: string; top_k?: number; session_id?: string; history_limit?: number }) =>
+    request<QAResponse>(`/api/jobs/${encodeURIComponent(id)}/qa`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  globalQA: (payload: { question: string; top_k?: number }) =>
+    request<QAResponse>('/api/qa', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  generateChapters: (id: string) =>
+    request<ChaptersResponse>(`/api/jobs/${encodeURIComponent(id)}/chapters`, {
+      method: 'POST',
+    }),
+  exportToNotion: (id: string) =>
+    request<NotionExportResponse>(`/api/jobs/${encodeURIComponent(id)}/export/notion`, {
+      method: 'POST',
+    }),
+  exportURL: (
+    id: string,
+    format: 'srt' | 'md' | 'txt' | 'md_bundle' | 'obsidian' | 'notion_import' | 'xmind_outline' | 'xmind_json',
+  ) =>
     `/api/jobs/${encodeURIComponent(id)}/export?format=${format}`,
   thumbnailURL: (id: string) => `/api/jobs/${encodeURIComponent(id)}/thumbnail`,
   frameURL: (id: string, index: number) =>

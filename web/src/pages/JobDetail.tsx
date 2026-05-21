@@ -8,6 +8,7 @@ import {
   JobEvent,
   LogLine,
   Phase,
+  QAResponse,
   Summary,
   SummaryKind,
   VisionStatus,
@@ -40,6 +41,13 @@ type Tab =
   | 'detailed'
   | 'outline'
   | 'mindmap'
+  | 'study_notes'
+  | 'wechat_article'
+  | 'course_handout'
+  | 'short_video_script'
+  | 'quote_cards'
+  | 'qa'
+  | 'chapters'
   | 'transcript'
   | 'segments'
   | 'frames'
@@ -50,13 +58,61 @@ const SUMMARY_TABS: { key: Exclude<Tab, 'transcript' | 'segments' | 'frames' | '
   { key: 'detailed', label: '详细摘要' },
   { key: 'outline', label: '大纲' },
   { key: 'mindmap', label: '思维导图' },
+  { key: 'study_notes', label: '学习笔记' },
+  { key: 'wechat_article', label: '公众号文案' },
+  { key: 'course_handout', label: '课程讲义' },
+  { key: 'short_video_script', label: '短视频脚本' },
+  { key: 'quote_cards', label: '金句卡片' },
+  { key: 'qa', label: '视频问答' },
+  { key: 'chapters', label: '章节' },
 ]
+
+const SUMMARY_KIND_SET = new Set<SummaryKind>([
+  'brief',
+  'detailed',
+  'outline',
+  'mindmap',
+  'study_notes',
+  'wechat_article',
+  'course_handout',
+  'short_video_script',
+  'quote_cards',
+])
 
 function formatTime(sec: number) {
   if (!isFinite(sec)) return '00:00'
   const m = Math.floor(sec / 60)
   const s = Math.floor(sec % 60)
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+}
+
+function toVideoURLWithTime(url: string, sec: number): string | null {
+  if (!url || !isFinite(sec) || sec < 0) return null
+  try {
+    const u = new URL(url)
+    u.searchParams.set('t', String(Math.floor(sec)))
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
+function findSegmentIndexBySecond(segments: { start: number; end: number }[], sec: number): number {
+  if (!isFinite(sec) || sec < 0 || segments.length === 0) return -1
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i]
+    if (sec >= s.start && sec <= s.end) return i
+  }
+  let nearest = 0
+  let best = Number.POSITIVE_INFINITY
+  for (let i = 0; i < segments.length; i++) {
+    const d = Math.abs(segments[i].start - sec)
+    if (d < best) {
+      best = d
+      nearest = i
+    }
+  }
+  return nearest
 }
 
 function formatDurationMs(ms: number | undefined): string {
@@ -135,11 +191,9 @@ function transcriptSourceLabel(source?: string): string | null {
 }
 
 // JobProgress shows a phase-aware progress bar while a job is still
-// running. The backend currently doesn't write per-phase percentages
-// into `job.progress` (the map is created but never updated mid-flight),
-// so when no value is available we fall back to an indeterminate
-// animation. The phase label + step indicator at least tells the user
-// "we're in extraction, not stuck" even without fine-grained percents.
+// running. Backend now provides coarse per-phase percentages; when a
+// phase cannot report numeric progress we fall back to an indeterminate
+// animation.
 function JobProgress({ job }: { job: Job }) {
   if (!IN_FLIGHT_PHASES.includes(job.phase)) return null
   const stepIdx = IN_FLIGHT_PHASES.indexOf(job.phase) // 0..3
@@ -326,6 +380,17 @@ export default function JobDetail() {
   const [liveLogs, setLiveLogs] = useState<LogLine[]>([])
   const [error, setError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [qaQuestion, setQaQuestion] = useState('')
+  const [qaResult, setQaResult] = useState<QAResponse | null>(null)
+  const [qaSessionId, setQaSessionId] = useState<string | null>(null)
+  const [qaLoading, setQaLoading] = useState(false)
+  const [qaError, setQaError] = useState<string | null>(null)
+  const [chaptersLoading, setChaptersLoading] = useState(false)
+  const [chaptersError, setChaptersError] = useState<string | null>(null)
+  const [notionExporting, setNotionExporting] = useState(false)
+  const [notionError, setNotionError] = useState<string | null>(null)
+  const [notionPageURL, setNotionPageURL] = useState<string | null>(null)
+  const [activeSegmentIdx, setActiveSegmentIdx] = useState<number | null>(null)
   // dispatchErrors holds 4xx/5xx errors from the POST /summarize call
   // itself (e.g. LLM not configured). These are transient — the
   // persisted entry status covers the "in-flight / completed / failed"
@@ -333,6 +398,7 @@ export default function JobDetail() {
   // hits 重新生成 again.
   const [dispatchErrors, setDispatchErrors] = useState<Partial<Record<SummaryKind, { error: string; hint: string | null }>>>({})
   const logsRef = useRef<HTMLDivElement | null>(null)
+  const segmentRefs = useRef<Record<number, HTMLDivElement | null>>({})
 
   function recordSummary(s: Summary) {
     setJob((prev) => {
@@ -389,6 +455,96 @@ export default function JobDetail() {
     }
   }
 
+  function jumpToSecond(sec: number) {
+    const segments = job?.transcript?.segments ?? []
+    if (segments.length === 0) return
+    const idx = findSegmentIndexBySecond(segments, sec)
+    if (idx < 0) return
+    setTab('segments')
+    setActiveSegmentIdx(idx)
+    window.setTimeout(() => {
+      segmentRefs.current[idx]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 30)
+  }
+
+  async function askQuestion() {
+    const question = qaQuestion.trim()
+    if (!question || qaLoading) return
+    setQaLoading(true)
+    setQaError(null)
+    try {
+      const res = await api.qa(id, {
+        question,
+        session_id: qaSessionId ?? undefined,
+        history_limit: 12,
+      })
+      setQaResult(res)
+      if (res.session_id) setQaSessionId(res.session_id)
+      setQaQuestion('')
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = (e.body ?? {}) as { error?: string; detail?: string }
+        setQaError(body.error || body.detail || e.message)
+      } else {
+        setQaError(String(e))
+      }
+    } finally {
+      setQaLoading(false)
+    }
+  }
+
+  function startNewQASession() {
+    setQaSessionId(null)
+    setQaResult(null)
+    setQaError(null)
+  }
+
+  async function generateChapters() {
+    if (chaptersLoading) return
+    setChaptersLoading(true)
+    setChaptersError(null)
+    try {
+      const res = await api.generateChapters(id)
+      setJob((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          chapters: res.chapters,
+          chapters_model: res.model,
+          chapters_generated_at: res.generated_at,
+        }
+      })
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = (e.body ?? {}) as { error?: string; detail?: string }
+        setChaptersError(body.error || body.detail || e.message)
+      } else {
+        setChaptersError(String(e))
+      }
+    } finally {
+      setChaptersLoading(false)
+    }
+  }
+
+  async function exportToNotion() {
+    if (notionExporting) return
+    setNotionExporting(true)
+    setNotionError(null)
+    try {
+      const res = await api.exportToNotion(id)
+      setNotionPageURL(res.page_url || null)
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const body = (e.body ?? {}) as { error?: string; detail?: string; hint?: string }
+        setNotionError(body.error || body.detail || body.hint || e.message)
+      } else {
+        setNotionError(String(e))
+      }
+    } finally {
+      setNotionExporting(false)
+    }
+  }
+
   async function doDelete() {
     if (deleting) return
     if (!confirm('确定删除这条转写记录吗？\n视频文件和转写文本都会被删除，无法恢复。')) return
@@ -426,8 +582,29 @@ export default function JobDetail() {
   }, [id])
 
   useEffect(() => {
+    setQaResult(null)
+    setQaSessionId(null)
+    setQaError(null)
+    setQaQuestion('')
+    setChaptersError(null)
+    setNotionError(null)
+    setNotionPageURL(null)
+    setActiveSegmentIdx(null)
+  }, [id])
+
+  useEffect(() => {
     if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight
   }, [liveLogs.length])
+
+  useEffect(() => {
+    if (qaSessionId) return
+    const sessions = job?.qa_sessions
+    if (!sessions || sessions.length === 0) return
+    const latest = [...sessions].sort((a, b) =>
+      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    )[0]
+    if (latest?.id) setQaSessionId(latest.id)
+  }, [job?.qa_sessions, qaSessionId])
 
   // Poll while any summary entry is still pending. SSE could push a
   // summary event instead, but the existing /events bus is phase-only
@@ -460,6 +637,19 @@ export default function JobDetail() {
     const persisted = job?.logs ?? []
     return [...persisted, ...liveLogs]
   }, [job?.logs, liveLogs])
+  const activeQAMessages = useMemo(() => {
+    if (qaResult?.messages && qaResult.messages.length > 0) return qaResult.messages
+    const sessions = job?.qa_sessions ?? []
+    if (sessions.length === 0) return []
+    if (qaSessionId) {
+      const matched = sessions.find((s) => s.id === qaSessionId)
+      if (matched) return matched.messages ?? []
+    }
+    const latest = [...sessions].sort((a, b) =>
+      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    )[0]
+    return latest?.messages ?? []
+  }, [job?.qa_sessions, qaResult?.messages, qaSessionId])
 
   if (!job && !error) {
     return (
@@ -486,6 +676,7 @@ export default function JobDetail() {
   const platform = detectPlatform(j.source?.webpage_url || j.url)
   const duration = j.source?.duration ? formatTime(j.source.duration) : null
   const canDelete = j.phase === 'done' || j.phase === 'failed'
+  const sourceVideoURL = j.source?.webpage_url || j.url
 
   return (
     <div className="shell">
@@ -571,25 +762,57 @@ export default function JobDetail() {
           </div>
         </div>
 
-        <div className="toolbar" style={{ marginTop: 22 }}>
+        <div className="detail-actions">
           {j.transcript && (
-            <>
-              <a className="btn secondary" href={api.exportURL(j.id, 'srt')} download>导出 SRT</a>
-              <a className="btn secondary" href={api.exportURL(j.id, 'md')} download>导出 Markdown</a>
-              <a className="btn secondary" href={api.exportURL(j.id, 'txt')} download>导出 TXT</a>
-            </>
+            <div className="export-actions">
+              <div className="action-group">
+                <a className="btn secondary" href={api.exportURL(j.id, 'srt')} download>导出 SRT</a>
+                <a className="btn secondary" href={api.exportURL(j.id, 'md')} download>导出 Markdown</a>
+                <a className="btn secondary" href={api.exportURL(j.id, 'txt')} download>导出 TXT</a>
+              </div>
+              <div className="action-group">
+                <a className="btn secondary" href={api.exportURL(j.id, 'md_bundle')} download>导出知识包</a>
+                <a className="btn secondary" href={api.exportURL(j.id, 'obsidian')} download>导出 Obsidian</a>
+                <a className="btn secondary" href={api.exportURL(j.id, 'notion_import')} download>导出 Notion 草稿</a>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={exportToNotion}
+                  disabled={notionExporting}
+                >
+                  {notionExporting ? '导出 Notion 中…' : '导出到 Notion'}
+                </button>
+                <a className="btn secondary" href={api.exportURL(j.id, 'xmind_outline')} download>导出 XMind 大纲</a>
+                <a className="btn secondary" href={api.exportURL(j.id, 'xmind_json')} download>导出 XMind JSON</a>
+              </div>
+            </div>
           )}
-          <button
-            type="button"
-            className="btn danger"
-            style={{ marginLeft: 'auto' }}
-            disabled={!canDelete || deleting}
-            title={canDelete ? '删除该任务及其音视频文件' : '任务进行中，无法删除'}
-            onClick={doDelete}
-          >
-            {deleting ? '删除中…' : '删除任务'}
-          </button>
+          <div className="danger-actions">
+            <button
+              type="button"
+              className="btn danger"
+              disabled={!canDelete || deleting}
+              title={canDelete ? '删除该任务及其音视频文件' : '任务进行中，无法删除'}
+              onClick={doDelete}
+            >
+              {deleting ? '删除中…' : '删除任务'}
+            </button>
+          </div>
         </div>
+        {notionError && (
+          <div className="notion-export-feedback error">
+            {notionError}
+          </div>
+        )}
+        {notionPageURL && (
+          <div className="notion-export-feedback">
+            已导出到 Notion：
+            {' '}
+            <a href={notionPageURL} target="_blank" rel="noreferrer">
+              打开页面
+            </a>
+          </div>
+        )}
       </section>
 
       {j.transcript ? (
@@ -602,7 +825,11 @@ export default function JobDetail() {
                 onClick={() => setTab(t.key)}
               >
                 {t.label}
-                {j.summaries?.[t.key as SummaryKind] && <span className="tab-dot" />}
+                {(t.key === 'qa' && activeQAMessages.length > 0)
+                  || (t.key === 'chapters' && (j.chapters?.length ?? 0) > 0)
+                  || (t.key !== 'qa' && t.key !== 'chapters' && j.summaries?.[t.key as SummaryKind])
+                  ? <span className="tab-dot" />
+                  : null}
               </button>
             ))}
             <span className="tab-sep" />
@@ -615,7 +842,7 @@ export default function JobDetail() {
             <button className={`tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>日志</button>
           </div>
 
-          {(tab === 'brief' || tab === 'detailed' || tab === 'outline' || tab === 'mindmap') && (() => {
+          {SUMMARY_KIND_SET.has(tab as SummaryKind) && (() => {
             // UI is driven entirely by the persisted entry status now:
             //   no entry  → "生成总结" button
             //   pending   → spinner ("正在请求大模型…")
@@ -624,26 +851,169 @@ export default function JobDetail() {
             // Dispatch errors (LLM not configured, 429, ...) come from
             // the POST /summarize call itself; they're separate from
             // the persisted entry and shown alongside.
-            const entry = j.summaries?.[tab as SummaryKind]
-            const dispatch = dispatchErrors[tab as SummaryKind]
+            const kind = tab as SummaryKind
+            const entry = j.summaries?.[kind]
+            const dispatch = dispatchErrors[kind]
             return (
               <SummaryPanel
-                kind={tab}
+                kind={kind}
                 entry={entry}
                 framesCount={j.frames?.length ?? 0}
                 visionStatus={visionStatusOf(j)}
                 dispatchError={dispatch ?? null}
-                onGenerate={() => generateSummary(tab as SummaryKind)}
+                onGenerate={() => generateSummary(kind)}
               />
             )
           })()}
+          {tab === 'qa' && (
+            <div className="qa-panel">
+              <div className="toolbar" style={{ marginTop: 0 }}>
+                <span className="chapters-meta">
+                  {qaSessionId ? `当前会话：${qaSessionId}` : '当前会话：新会话'}
+                </span>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  style={{ height: 32, padding: '0 12px', fontSize: 12.5 }}
+                  onClick={startNewQASession}
+                >
+                  新建会话
+                </button>
+              </div>
+              <div className="qa-form">
+                <textarea
+                  value={qaQuestion}
+                  onChange={(e) => setQaQuestion(e.target.value)}
+                  placeholder={activeQAMessages.length > 0 ? '继续追问…' : '例如：这段视频对 RAG 的核心观点是什么？'}
+                />
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={askQuestion}
+                  disabled={qaLoading || !qaQuestion.trim()}
+                >
+                  {qaLoading ? '提问中…' : '发送问题'}
+                </button>
+              </div>
+              {qaError && <div className="error" style={{ marginTop: 12 }}>{qaError}</div>}
+              {!qaError && activeQAMessages.length === 0 && !qaLoading && (
+                <div className="empty" style={{ marginTop: 12 }}>
+                  输入问题后，系统会先检索 transcript 分段，再基于命中片段回答；支持在同一会话继续追问。
+                </div>
+              )}
+              {activeQAMessages.length > 0 && (
+                <div className="qa-answer">
+                  {activeQAMessages.map((msg, idx) => (
+                    <div className="qa-turn" key={`${idx}-${msg.role}-${msg.at}`}>
+                      <div className="qa-answer-title">{msg.role === 'assistant' ? '助手' : '你'}</div>
+                      <div className="qa-answer-text">{msg.content}</div>
+                      {msg.role === 'assistant' && (
+                        <div className="qa-citations">
+                          <div className="qa-citations-title">引用片段</div>
+                          {(msg.citations?.length ?? 0) === 0 ? (
+                            <div className="empty">未返回引用片段</div>
+                          ) : (
+                            msg.citations!.map((c, cIdx) => {
+                              const timedURL = toVideoURLWithTime(sourceVideoURL, c.start)
+                              return (
+                                <div className="qa-citation" key={`${cIdx}-${c.start}-${c.end}`}>
+                                  <button
+                                    type="button"
+                                    className="time-link"
+                                    onClick={() => jumpToSecond(c.start)}
+                                  >
+                                    {formatTime(c.start)} → {formatTime(c.end)}
+                                  </button>
+                                  {timedURL && (
+                                    <a href={timedURL} target="_blank" rel="noreferrer" className="qa-video-link">
+                                      打开视频
+                                    </a>
+                                  )}
+                                  <div className="qa-citation-text">{c.text}</div>
+                                </div>
+                              )
+                            })
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {tab === 'chapters' && (
+            <div className="chapters-panel">
+              <div className="toolbar" style={{ marginTop: 0, marginBottom: 12 }}>
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={generateChapters}
+                  disabled={chaptersLoading}
+                >
+                  {chaptersLoading ? '生成中…' : (j.chapters?.length ? '重新生成章节' : '生成章节')}
+                </button>
+                {j.chapters_generated_at && (
+                  <span className="chapters-meta">
+                    上次生成：{new Date(j.chapters_generated_at).toLocaleString()}
+                  </span>
+                )}
+              </div>
+              {chaptersError && <div className="error">{chaptersError}</div>}
+              {!chaptersError && (j.chapters?.length ?? 0) === 0 && !chaptersLoading && (
+                <div className="empty">暂无章节，点击上方按钮生成。</div>
+              )}
+              {(j.chapters?.length ?? 0) > 0 && (
+                <div className="chapters-list">
+                  {j.chapters!.map((ch, idx) => (
+                    <article className="chapter-card" key={`${idx}-${ch.start_sec}`}>
+                      <div className="chapter-head">
+                        <button
+                          type="button"
+                          className="time-link"
+                          onClick={() => jumpToSecond(ch.start_sec)}
+                        >
+                          {formatTime(ch.start_sec)} → {formatTime(ch.end_sec)}
+                        </button>
+                        <h3>{ch.title || `第 ${idx + 1} 章`}</h3>
+                      </div>
+                      <ul>
+                        {ch.bullets?.map((b, i) => <li key={i}>{b}</li>)}
+                      </ul>
+                      {(ch.key_quotes?.length ?? 0) > 0 && (
+                        <div className="chapter-quotes">
+                          <div className="qa-citations-title">关键句速览</div>
+                          {ch.key_quotes!.map((q, qi) => (
+                            <div className="qa-citation" key={`${qi}-${q.start_sec}`}>
+                              <button
+                                type="button"
+                                className="time-link"
+                                onClick={() => jumpToSecond(q.start_sec)}
+                              >
+                                {formatTime(q.start_sec)} → {formatTime(q.end_sec)}
+                              </button>
+                              <div className="qa-citation-text">{q.text}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {tab === 'transcript' && (
             <div className="transcript">{j.transcript.full_text}</div>
           )}
           {tab === 'segments' && (
             <div className="segments-list">
               {j.transcript.segments.map((s, i) => (
-                <div className="segment" key={i}>
+                <div
+                  className={`segment ${activeSegmentIdx === i ? 'is-active' : ''}`}
+                  key={i}
+                  ref={(el) => { segmentRefs.current[i] = el }}
+                >
                   <div className="segment-time">
                     {formatTime(s.start)} → {formatTime(s.end)}
                   </div>

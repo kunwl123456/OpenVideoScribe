@@ -25,7 +25,7 @@ func writeJobJSON(t *testing.T, dataDir string, j *Job) {
 	}
 }
 
-func TestRecoverStaleJobs_MarksMidFlightAsFailedAndPersists(t *testing.T) {
+func TestRecoverStaleJobs_RequeuesMidFlightAndPersists(t *testing.T) {
 	dataDir := t.TempDir()
 	created := time.Date(2026, 5, 16, 19, 9, 34, 0, time.UTC)
 
@@ -45,28 +45,27 @@ func TestRecoverStaleJobs_MarksMidFlightAsFailedAndPersists(t *testing.T) {
 	}
 
 	cases := []struct {
-		id      string
-		wantErr string
+		id string
 	}{
-		{"zombie-dl", "interrupted (server restarted while downloading)"},
-		{"zombie-tx", "interrupted (server restarted while transcribing)"},
-		{"zombie-an", "interrupted (server restarted while analyzing)"},
+		{"zombie-dl"},
+		{"zombie-tx"},
+		{"zombie-an"},
 	}
 	for _, tc := range cases {
 		j, ok := s.Get(tc.id)
 		if !ok {
 			t.Fatalf("%s: not in store", tc.id)
 		}
-		if j.Phase != PhaseFailed {
-			t.Errorf("%s: phase = %s, want failed", tc.id, j.Phase)
+		if j.Phase != PhaseQueued {
+			t.Errorf("%s: phase = %s, want queued", tc.id, j.Phase)
 		}
-		if j.Error != tc.wantErr {
-			t.Errorf("%s: error = %q, want %q", tc.id, j.Error, tc.wantErr)
+		if j.Error != "" {
+			t.Errorf("%s: error = %q, want empty", tc.id, j.Error)
 		}
-		if j.FinishedAt == nil {
-			t.Errorf("%s: FinishedAt nil, want set", tc.id)
+		if j.FinishedAt != nil {
+			t.Errorf("%s: FinishedAt should be cleared after requeue", tc.id)
 		}
-		if len(j.Logs) == 0 || j.Logs[len(j.Logs)-1].Message != "服务重启，任务被中断" {
+		if len(j.Logs) == 0 || j.Logs[len(j.Logs)-1].Message != "服务重启，任务已重新排队" {
 			t.Errorf("%s: expected final log line about restart, got %+v", tc.id, j.Logs)
 		}
 	}
@@ -87,7 +86,7 @@ func TestRecoverStaleJobs_MarksMidFlightAsFailedAndPersists(t *testing.T) {
 	}
 	for _, tc := range cases {
 		j, _ := s2.Get(tc.id)
-		if j.Phase != PhaseFailed || j.Error != tc.wantErr {
+		if j.Phase != PhaseQueued || j.Error != "" {
 			t.Errorf("%s: state lost across restart (phase=%s err=%q)", tc.id, j.Phase, j.Error)
 		}
 	}
@@ -101,12 +100,12 @@ func TestRecoverStaleJobs_MarksMidFlightAsFailedAndPersists(t *testing.T) {
 	if err := json.Unmarshal(raw, &disk); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if disk.Phase != PhaseFailed || disk.FinishedAt == nil {
+	if disk.Phase != PhaseQueued || disk.FinishedAt != nil {
 		t.Errorf("on-disk job not persisted: phase=%s finished=%v", disk.Phase, disk.FinishedAt)
 	}
 }
 
-func TestRecoverStaleJobs_PreservesExistingError(t *testing.T) {
+func TestRecoverStaleJobs_ClearsStaleErrorWhenRequeued(t *testing.T) {
 	dataDir := t.TempDir()
 	writeJobJSON(t, dataDir, &Job{
 		ID:    "with-err",
@@ -118,11 +117,11 @@ func TestRecoverStaleJobs_PreservesExistingError(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	j, _ := s.Get("with-err")
-	if j.Phase != PhaseFailed {
-		t.Errorf("phase = %s, want failed", j.Phase)
+	if j.Phase != PhaseQueued {
+		t.Errorf("phase = %s, want queued", j.Phase)
 	}
-	if j.Error != "whisper segfault" {
-		t.Errorf("error overwritten: %q", j.Error)
+	if j.Error != "" {
+		t.Errorf("error should be cleared on requeue: %q", j.Error)
 	}
 }
 
@@ -162,5 +161,47 @@ func TestRecoverStaleVision_MarksPendingOrRunningAsFailed(t *testing.T) {
 	j, _ := s.Get("vision-done")
 	if j.VisionStatus != VisionDone || len(j.Logs) != 0 {
 		t.Errorf("vision-done mutated: status=%s logs=%d", j.VisionStatus, len(j.Logs))
+	}
+}
+
+func TestAppendQAMessages_CreatesAndAppendsSession(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.Create(&Job{
+		ID:        "job1",
+		URL:       "https://example.com",
+		Model:     "base",
+		Language:  "auto",
+		Phase:     PhaseDone,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sess, err := s.AppendQAMessages("job1", "sess-a",
+		QAMessage{Role: "user", Content: "问题1"},
+		QAMessage{Role: "assistant", Content: "回答1", Citations: []QACitation{{Text: "片段", Start: 1, End: 2}}},
+	)
+	if err != nil {
+		t.Fatalf("AppendQAMessages first: %v", err)
+	}
+	if sess.ID != "sess-a" || len(sess.Messages) != 2 {
+		t.Fatalf("unexpected first session: %+v", sess)
+	}
+	sess2, err := s.AppendQAMessages("job1", "sess-a",
+		QAMessage{Role: "user", Content: "问题2"},
+		QAMessage{Role: "assistant", Content: "回答2"},
+	)
+	if err != nil {
+		t.Fatalf("AppendQAMessages second: %v", err)
+	}
+	if len(sess2.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(sess2.Messages))
+	}
+	j, ok := s.Get("job1")
+	if !ok || len(j.QASessions) != 1 {
+		t.Fatalf("job qa sessions missing: %+v", j.QASessions)
 	}
 }

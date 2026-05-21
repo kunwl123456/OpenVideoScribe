@@ -1,5 +1,5 @@
 // Package jobs ties the pipeline together: yt-dlp -> ffmpeg -> whisper.
-// Single-worker queue, fan-out events to anyone subscribed for SSE.
+// Concurrent worker queue, fan-out events to anyone subscribed for SSE.
 package jobs
 
 import (
@@ -10,9 +10,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +33,11 @@ import (
 // poster images. We deliberately use a short timeout: the thumbnail
 // is best-effort and must never block job completion.
 var thumbnailHTTPClient = &http.Client{Timeout: 8 * time.Second}
+
+var (
+	downloadPercentRe    = regexp.MustCompile(`(\d{1,3}(?:\.\d+)?)%`)
+	transcribeProgressRe = regexp.MustCompile(`至\s*([0-9]+(?:\.[0-9]+)?)s`)
+)
 
 // ErrJobInProgress is returned by Delete when the caller tries to remove
 // a job that hasn't reached a terminal phase yet. The HTTP layer maps
@@ -65,11 +73,19 @@ type Event struct {
 // it reports !Enabled()) the pipeline skips the visual-analysis stage
 // entirely and behaves identically to the pre-VLM build.
 func NewManager(cfg *config.Config, st *store.Store, visionSvc *vision.Service) *Manager {
+	workers := 1
+	if cfg != nil && cfg.WorkerConcurrency > 0 {
+		workers = cfg.WorkerConcurrency
+	}
+	queueCap := workers * 32
+	if queueCap < 32 {
+		queueCap = 32
+	}
 	return &Manager{
 		cfg:       cfg,
 		store:     st,
 		vision:    visionSvc,
-		queue:     make(chan string, 32),
+		queue:     make(chan string, queueCap),
 		visionSem: make(chan struct{}, 1),
 		subs:      map[string]map[chan Event]struct{}{},
 		allSubs:   map[chan Event]struct{}{},
@@ -79,18 +95,25 @@ func NewManager(cfg *config.Config, st *store.Store, visionSvc *vision.Service) 
 // Start spins up the worker goroutine. Stop with the returned context's
 // cancel — when it fires the worker drains and exits.
 func (m *Manager) Start(ctx context.Context) {
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case id := <-m.queue:
-				m.run(ctx, id)
+	workers := 1
+	if m.cfg != nil && m.cfg.WorkerConcurrency > 0 {
+		workers = m.cfg.WorkerConcurrency
+	}
+	m.requeueUnfinished()
+	for i := 0; i < workers; i++ {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case id := <-m.queue:
+					m.run(ctx, id)
+				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
 // Wait blocks until the worker exits. Useful for graceful shutdown.
@@ -148,6 +171,10 @@ func (m *Manager) run(parent context.Context, id string) {
 		j.Phase = store.PhaseDownloading
 		j.StartedAt = &now
 		j.Message = "starting"
+		if j.Progress == nil {
+			j.Progress = map[store.Phase]int{}
+		}
+		j.Progress[store.PhaseDownloading] = 1
 	})
 	if err != nil {
 		log.Printf("jobs: update failed: %v", err)
@@ -170,9 +197,18 @@ func (m *Manager) run(parent context.Context, id string) {
 	if jobVisionEnabled {
 		format = ytdlp.FormatVideoPlusAudio
 	}
-	dlRes, err := ytdlp.Download(ctx, m.cfg, job.URL, m.cfg.DownloadsDir, format, func(line string) {
-		m.appendLog(id, store.PhaseDownloading, line)
-		m.emit(id, Event{JobID: id, Phase: store.PhaseDownloading, Message: line})
+	dlRes, err := retryWithBackoff(ctx, m.retryCount(), m.retryBackoff(), func(attempt int, e error) {
+		msg := fmt.Sprintf("下载失败，准备重试 (%d/%d): %v", attempt, m.retryCount(), e)
+		m.appendLog(id, store.PhaseDownloading, msg)
+		m.emit(id, Event{JobID: id, Phase: store.PhaseDownloading, Message: msg})
+	}, func() (*ytdlp.Result, error) {
+		return ytdlp.Download(ctx, m.cfg, job.URL, m.cfg.DownloadsDir, format, func(line string) {
+			m.appendLog(id, store.PhaseDownloading, line)
+			m.emit(id, Event{JobID: id, Phase: store.PhaseDownloading, Message: line})
+			if p, ok := parseDownloadPercent(line); ok {
+				_ = m.setProgress(id, store.PhaseDownloading, p)
+			}
+		})
 	})
 	if err != nil {
 		m.fail(id, fmt.Errorf("download: %w", err))
@@ -181,6 +217,11 @@ func (m *Manager) run(parent context.Context, id string) {
 	_, _ = m.store.Update(id, func(j *store.Job) {
 		j.Source = &dlRes.Info
 		j.MediaPath = dlRes.FilePath
+		if j.Progress == nil {
+			j.Progress = map[store.Phase]int{}
+		}
+		j.Progress[store.PhaseDownloading] = 100
+		j.Progress[store.PhaseExtracting] = 1
 	})
 
 	// 1b. Best-effort poster fetch. Bilibili thumbnails are
@@ -199,6 +240,10 @@ func (m *Manager) run(parent context.Context, id string) {
 	_, _ = m.store.Update(id, func(j *store.Job) {
 		j.Phase = store.PhaseTranscribing
 		j.Message = "checking platform subtitles"
+		if j.Progress == nil {
+			j.Progress = map[store.Phase]int{}
+		}
+		j.Progress[store.PhaseTranscribing] = 10
 	})
 	m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: "checking platform subtitles"})
 	res, transcriptSource, subErr := m.tryPlatformSubtitle(ctx, id, job, dlRes.Info.ID)
@@ -209,28 +254,54 @@ func (m *Manager) run(parent context.Context, id string) {
 		_, _ = m.store.Update(id, func(j *store.Job) {
 			j.Phase = store.PhaseExtracting
 			j.Message = "extracting audio"
+			if j.Progress == nil {
+				j.Progress = map[store.Phase]int{}
+			}
+			j.Progress[store.PhaseExtracting] = 20
 		})
 		m.emit(id, Event{JobID: id, Phase: store.PhaseExtracting, Message: "extracting audio"})
-		wav, err := media.ExtractAudio(ctx, m.cfg, dlRes.FilePath, m.cfg.WorkDir)
+		wav, err := retryWithBackoff(ctx, m.retryCount(), m.retryBackoff(), func(attempt int, e error) {
+			msg := fmt.Sprintf("抽取音频失败，准备重试 (%d/%d): %v", attempt, m.retryCount(), e)
+			m.appendLog(id, store.PhaseExtracting, msg)
+			m.emit(id, Event{JobID: id, Phase: store.PhaseExtracting, Message: msg})
+		}, func() (string, error) {
+			return media.ExtractAudio(ctx, m.cfg, dlRes.FilePath, m.cfg.WorkDir)
+		})
 		if err != nil {
 			m.fail(id, fmt.Errorf("extract: %w", err))
 			return
 		}
+		_ = m.setProgress(id, store.PhaseExtracting, 100)
 
 		// 3. Transcribe with Whisper.
 		_, _ = m.store.Update(id, func(j *store.Job) {
 			j.Phase = store.PhaseTranscribing
 			j.Message = "transcribing"
+			if j.Progress == nil {
+				j.Progress = map[store.Phase]int{}
+			}
+			if j.Progress[store.PhaseTranscribing] < 30 {
+				j.Progress[store.PhaseTranscribing] = 30
+			}
 		})
 		m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: "transcribing"})
-		res, err = asr.Transcribe(ctx, m.cfg, asr.Request{
-			AudioPath: wav,
-			Model:     job.Model,
-			Language:  job.Language,
-			OnProgress: func(msg string) {
-				m.appendLog(id, store.PhaseTranscribing, msg)
-				m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
-			},
+		res, err = retryWithBackoff(ctx, m.retryCount(), m.retryBackoff(), func(attempt int, e error) {
+			msg := fmt.Sprintf("转写失败，准备重试 (%d/%d): %v", attempt, m.retryCount(), e)
+			m.appendLog(id, store.PhaseTranscribing, msg)
+			m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
+		}, func() (*asr.Result, error) {
+			return asr.Transcribe(ctx, m.cfg, asr.Request{
+				AudioPath: wav,
+				Model:     job.Model,
+				Language:  job.Language,
+				OnProgress: func(msg string) {
+					m.appendLog(id, store.PhaseTranscribing, msg)
+					m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
+					if p, ok := parseTranscribePercent(msg, job.Source); ok {
+						_ = m.setProgress(id, store.PhaseTranscribing, p)
+					}
+				},
+			})
 		})
 		if err != nil {
 			m.fail(id, fmt.Errorf("transcribe: %w", err))
@@ -246,6 +317,11 @@ func (m *Manager) run(parent context.Context, id string) {
 		j.Phase = store.PhaseDone
 		j.FinishedAt = &finished
 		j.Message = "done"
+		if j.Progress == nil {
+			j.Progress = map[store.Phase]int{}
+		}
+		j.Progress[j.Phase] = 100
+		j.Progress[store.PhaseTranscribing] = 100
 		if jobVisionEnabled {
 			j.VisionStatus = store.VisionPending
 			j.VisionMessage = "画面理解将在后台继续进行"
@@ -276,6 +352,7 @@ func (m *Manager) tryPlatformSubtitle(ctx context.Context, id string, job *store
 	msg := fmt.Sprintf("使用平台字幕（%s，%s）", sub.Language, sub.Kind)
 	m.appendLog(id, store.PhaseTranscribing, msg)
 	m.emit(id, Event{JobID: id, Phase: store.PhaseTranscribing, Message: msg})
+	_ = m.setProgress(id, store.PhaseTranscribing, 100)
 	return res, "platform_subtitle", nil
 }
 
@@ -670,6 +747,124 @@ func (m *Manager) emit(id string, ev Event) {
 		default:
 		}
 	}
+}
+
+func (m *Manager) requeueUnfinished() {
+	jobs := m.store.List()
+	if len(jobs) == 0 {
+		return
+	}
+	for _, j := range jobs {
+		if j == nil || j.ID == "" {
+			continue
+		}
+		if j.Phase != store.PhaseQueued {
+			continue
+		}
+		select {
+		case m.queue <- j.ID:
+			m.emit(j.ID, Event{JobID: j.ID, Phase: store.PhaseQueued, Message: "服务重启后恢复排队"})
+		default:
+			log.Printf("jobs: resume queue full, skip %s", j.ID)
+		}
+	}
+}
+
+func (m *Manager) retryCount() int {
+	if m.cfg == nil || m.cfg.JobRetryCount < 0 {
+		return 0
+	}
+	return m.cfg.JobRetryCount
+}
+
+func (m *Manager) retryBackoff() time.Duration {
+	if m.cfg == nil || m.cfg.RetryBackoff <= 0 {
+		return 1200 * time.Millisecond
+	}
+	return m.cfg.RetryBackoff
+}
+
+func (m *Manager) setProgress(id string, phase store.Phase, value int) error {
+	v := int(math.Max(0, math.Min(100, float64(value))))
+	_, err := m.store.Update(id, func(j *store.Job) {
+		if j.Progress == nil {
+			j.Progress = map[store.Phase]int{}
+		}
+		if prev := j.Progress[phase]; v > prev {
+			j.Progress[phase] = v
+		}
+	})
+	return err
+}
+
+func parseDownloadPercent(line string) (int, bool) {
+	m := downloadPercentRe.FindStringSubmatch(line)
+	if len(m) < 2 {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(math.Round(f)), true
+}
+
+func parseTranscribePercent(msg string, source *ytdlp.Info) (int, bool) {
+	m := transcribeProgressRe.FindStringSubmatch(msg)
+	if len(m) < 2 || source == nil || source.Duration <= 0 {
+		return 0, false
+	}
+	done, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || done <= 0 {
+		return 0, false
+	}
+	p := int(math.Round(done / source.Duration * 100))
+	if p < 0 {
+		p = 0
+	}
+	if p > 100 {
+		p = 100
+	}
+	return p, true
+}
+
+func retryWithBackoff[T any](
+	ctx context.Context,
+	maxRetries int,
+	baseBackoff time.Duration,
+	onRetry func(attempt int, err error),
+	fn func() (T, error),
+) (T, error) {
+	var zero T
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if baseBackoff <= 0 {
+		baseBackoff = time.Second
+	}
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		v, err := fn()
+		if err == nil {
+			return v, nil
+		}
+		lastErr = err
+		if attempt == maxRetries {
+			break
+		}
+		if onRetry != nil {
+			onRetry(attempt+1, err)
+		}
+		wait := baseBackoff * time.Duration(1<<attempt)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return zero, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return zero, lastErr
 }
 
 func newID() (string, error) {

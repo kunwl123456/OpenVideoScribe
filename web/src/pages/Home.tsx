@@ -71,6 +71,10 @@ export default function Home() {
   const [modelsCollapsed, setModelsCollapsed] = useState(true)
   const [vlmEnabled, setVlmEnabled] = useState(false)
   const [enableVision, setEnableVision] = useState(() => readStoredBool(VISION_STORAGE_KEY, false))
+  const [kbQuestion, setKbQuestion] = useState('')
+  const [kbLoading, setKbLoading] = useState(false)
+  const [kbError, setKbError] = useState<string | null>(null)
+  const [kbAnswer, setKbAnswer] = useState<{ answer: string; citations: { job_id?: string; job_title?: string; start: number; end: number; text: string }[] } | null>(null)
 
   async function refreshModels() {
     try {
@@ -163,6 +167,21 @@ export default function Home() {
       refreshModels()
     } catch (e) {
       setError(String(e))
+    }
+  }
+
+  async function askGlobalQA() {
+    const question = kbQuestion.trim()
+    if (!question || kbLoading) return
+    setKbLoading(true)
+    setKbError(null)
+    try {
+      const res = await api.globalQA({ question, top_k: 6 })
+      setKbAnswer({ answer: res.answer, citations: res.citations })
+    } catch (err) {
+      setKbError(String(err))
+    } finally {
+      setKbLoading(false)
     }
   }
 
@@ -334,6 +353,44 @@ export default function Home() {
           </div>
         )}
         {error && <div className="error" style={{ marginTop: 16 }}>{error}</div>}
+      </section>
+
+      <section className="qa-panel" style={{ marginBottom: 24 }}>
+        <div className="section-head" style={{ marginTop: 0 }}>
+          <h2 className="section-title">跨视频知识库问答（MVP）</h2>
+        </div>
+        <div className="qa-form">
+          <textarea
+            value={kbQuestion}
+            onChange={(e) => setKbQuestion(e.target.value)}
+            placeholder="例如：最近几个视频里，对 RAG 检索质量的共同观点是什么？"
+          />
+          <button className="btn" type="button" onClick={askGlobalQA} disabled={kbLoading || !kbQuestion.trim()}>
+            {kbLoading ? '检索中…' : '提问'}
+          </button>
+        </div>
+        {kbError && <div className="error" style={{ marginTop: 12 }}>{kbError}</div>}
+        {kbAnswer && (
+          <div className="qa-answer">
+            <div className="qa-answer-title">回答</div>
+            <div className="qa-answer-text">{kbAnswer.answer}</div>
+            <div className="qa-citations">
+              <div className="qa-citations-title">跨视频引用</div>
+              {kbAnswer.citations.map((c, idx) => (
+                <div className="qa-citation" key={`${idx}-${c.job_id}-${c.start}`}>
+                  <button
+                    type="button"
+                    className="time-link"
+                    onClick={() => c.job_id && nav(`/jobs/${c.job_id}`)}
+                  >
+                    [{c.job_title || c.job_id || 'unknown'}] {formatDuration(c.start)} → {formatDuration(c.end)}
+                  </button>
+                  <div className="qa-citation-text">{c.text}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <div className="section-head">

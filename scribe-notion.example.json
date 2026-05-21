@@ -1,0 +1,9 @@
+{
+  "token": "secret_xxx",
+  "database_id": "",
+  "page_id": "",
+  "title_property": "Name",
+  "url_property": "SourceURL",
+  "notion_version": "2022-06-28",
+  "timeout_seconds": 25
+}

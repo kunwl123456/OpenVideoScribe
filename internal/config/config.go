@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Config is a flat snapshot taken from env vars at boot.
@@ -28,6 +30,15 @@ type Config struct {
 	ModelBaseURLs []string   // tried in order; first that succeeds wins
 	LLM           *LLMConfig // OpenAI-compatible LLM provider, may be unconfigured
 	VLM           *VLMConfig // OpenAI-compatible vision provider, may be unconfigured
+	Notion        *NotionConfig
+	// WorkerConcurrency controls how many transcription jobs can run in parallel.
+	WorkerConcurrency int
+	// JobRetryCount controls retries for download/extract/transcribe stages.
+	JobRetryCount int
+	// SummaryRetryCount controls retries for summary generation.
+	SummaryRetryCount int
+	// RetryBackoff is the initial retry backoff; retries use exponential backoff.
+	RetryBackoff time.Duration
 }
 
 // Load builds a Config from env vars, creating the data directories on
@@ -42,17 +53,33 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		Addr:          addr,
-		DataDir:       dataDir,
-		ModelsDir:     filepath.Join(dataDir, "models"),
-		DownloadsDir:  filepath.Join(dataDir, "downloads"),
-		ThumbnailsDir: filepath.Join(dataDir, "thumbnails"),
-		FramesDir:     filepath.Join(dataDir, "frames"),
-		WorkDir:       filepath.Join(dataDir, "work"),
-		WhisperBin:    envOr("SCRIBE_WHISPER_BIN", ""),
-		FFmpegBin:     envOr("SCRIBE_FFMPEG_BIN", ""),
-		YtDlpBin:      envOr("SCRIBE_YTDLP_BIN", ""),
-		ModelBaseURLs: parseModelBaseURLs(os.Getenv("WHISPER_MODEL_BASE_URL")),
+		Addr:              addr,
+		DataDir:           dataDir,
+		ModelsDir:         filepath.Join(dataDir, "models"),
+		DownloadsDir:      filepath.Join(dataDir, "downloads"),
+		ThumbnailsDir:     filepath.Join(dataDir, "thumbnails"),
+		FramesDir:         filepath.Join(dataDir, "frames"),
+		WorkDir:           filepath.Join(dataDir, "work"),
+		WhisperBin:        envOr("SCRIBE_WHISPER_BIN", ""),
+		FFmpegBin:         envOr("SCRIBE_FFMPEG_BIN", ""),
+		YtDlpBin:          envOr("SCRIBE_YTDLP_BIN", ""),
+		ModelBaseURLs:     parseModelBaseURLs(os.Getenv("WHISPER_MODEL_BASE_URL")),
+		WorkerConcurrency: envIntOr("SCRIBE_WORKER_CONCURRENCY", 1),
+		JobRetryCount:     envIntOr("SCRIBE_JOB_RETRY_COUNT", 1),
+		SummaryRetryCount: envIntOr("SCRIBE_SUMMARY_RETRY_COUNT", 1),
+		RetryBackoff:      time.Duration(envIntOr("SCRIBE_RETRY_BACKOFF_MS", 1200)) * time.Millisecond,
+	}
+	if c.WorkerConcurrency <= 0 {
+		c.WorkerConcurrency = 1
+	}
+	if c.JobRetryCount < 0 {
+		c.JobRetryCount = 0
+	}
+	if c.SummaryRetryCount < 0 {
+		c.SummaryRetryCount = 0
+	}
+	if c.RetryBackoff <= 0 {
+		c.RetryBackoff = 1200 * time.Millisecond
 	}
 
 	for _, dir := range []string{c.ModelsDir, c.DownloadsDir, c.ThumbnailsDir, c.FramesDir, c.WorkDir} {
@@ -76,6 +103,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	c.VLM = vlm
+
+	notionCfg, err := loadNotionConfig(c.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	c.Notion = notionCfg
 
 	return c, nil
 }
@@ -103,6 +136,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envIntOr(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // defaultModelBaseURLs is the fallback list when WHISPER_MODEL_BASE_URL

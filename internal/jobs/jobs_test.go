@@ -130,3 +130,23 @@ func TestSubmitStoresUncheckedVisionAsDisabled(t *testing.T) {
 		t.Fatalf("VisionStatus = %s, want disabled", job.VisionStatus)
 	}
 }
+
+func TestRetryWithBackoffEventuallySucceeds(t *testing.T) {
+	attempts := 0
+	got, err := retryWithBackoff(context.Background(), 2, time.Millisecond, nil, func() (string, error) {
+		attempts++
+		if attempts < 3 {
+			return "", errors.New("temporary")
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("retryWithBackoff err: %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("result = %q, want ok", got)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
